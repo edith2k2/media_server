@@ -1,0 +1,2 @@
+launchctl unload ~/Library/LaunchAgents/com.vamshi.mediaserver.plist                                                                                      ─╯
+launchctl load ~/Library/LaunchAgents/com.vamshi.mediaserver.plist
