@@ -269,6 +269,72 @@ function getAllTags() {
     return Array.from(tags).sort();
 }
 
+
+// Add subtitle extraction function
+async function extractSubtitles(videoPath, outputDir) {
+    return new Promise((resolve, reject) => {
+        const subtitleTracks = [];
+        
+        // First, probe the video to find subtitle streams
+        ffmpeg.ffprobe(videoPath, (err, metadata) => {
+            if (err) {
+                console.error('FFprobe error:', err);
+                return resolve([]); // No subtitles available
+            }
+            
+            const streams = metadata.streams || [];
+            const subtitleStreams = streams.filter(stream => 
+                stream.codec_type === 'subtitle' && 
+                (stream.codec_name === 'subrip' || stream.codec_name === 'ass' || stream.codec_name === 'webvtt')
+            );
+            
+            if (subtitleStreams.length === 0) {
+                return resolve([]); // No subtitle streams found
+            }
+            
+            // Extract each subtitle stream
+            let extractionPromises = [];
+            
+            subtitleStreams.forEach((stream, index) => {
+                const language = stream.tags?.language || `track${index}`;
+                const title = stream.tags?.title || `Subtitle ${index + 1}`;
+                const outputPath = path.join(outputDir, `subtitle_${index}.vtt`);
+                
+                const extractionPromise = new Promise((resolveExtraction, rejectExtraction) => {
+                    ffmpeg(videoPath)
+                        .outputOptions([
+                            `-map 0:s:${index}`, // Map subtitle stream
+                            '-c:s webvtt'        // Convert to WebVTT format
+                        ])
+                        .output(outputPath)
+                        .on('end', () => {
+                            subtitleTracks.push({
+                                index: index,
+                                language: language,
+                                title: title,
+                                path: outputPath,
+                                url: `/api/subtitle/${encodeURIComponent(path.relative(MEDIA_ROOT, videoPath))}/${index}`
+                            });
+                            resolveExtraction();
+                        })
+                        .on('error', (extractErr) => {
+                            console.error(`Subtitle extraction error for stream ${index}:`, extractErr);
+                            resolveExtraction(); // Don't fail the whole process
+                        })
+                        .run();
+                });
+                
+                extractionPromises.push(extractionPromise);
+            });
+            
+            Promise.all(extractionPromises).then(() => {
+                resolve(subtitleTracks);
+            });
+        });
+    });
+}
+
+
 // Main page with file system browser
 app.get('/', (req, res) => {
     const currentPath = req.query.path || '';
@@ -1267,129 +1333,161 @@ app.delete('/api/remove-tag', (req, res) => {
     }
 });
 
-// Enhanced stream endpoint with better path handling
-app.get('/stream/:filename(*)', (req, res) => {
+// Add subtitle serving endpoint
+app.get('/api/subtitle/:filename(*)/:track', async (req, res) => {
     try {
-        // Get the full path including additional path segments
-        const encodedPath = req.params.filename ;
-        console.log('Raw encoded path:', encodedPath);
-        
+        const encodedPath = req.params.filename;
+        const trackIndex = parseInt(req.params.track);
         const decodedPath = safeDecodeFilePath(encodedPath);
-        console.log('Decoded path:', decodedPath);
+        const fullVideoPath = validateFilePath(decodedPath);
         
+        if (!fs.existsSync(fullVideoPath)) {
+            return res.status(404).send('Video file not found');
+        }
+        
+        // Create temp directory for subtitles
+        const tempDir = path.join(__dirname, 'temp', 'subtitles');
+        if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+        }
+        
+        const videoBasename = path.basename(fullVideoPath, path.extname(fullVideoPath));
+        const subtitlePath = path.join(tempDir, `${videoBasename}_${trackIndex}.vtt`);
+        
+        // Check if subtitle already extracted
+        if (fs.existsSync(subtitlePath)) {
+            res.setHeader('Content-Type', 'text/vtt');
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            return res.sendFile(subtitlePath);
+        }
+        
+        // Extract subtitle on demand
+        ffmpeg(fullVideoPath)
+            .outputOptions([
+                `-map 0:s:${trackIndex}`,
+                '-c:s webvtt'
+            ])
+            .output(subtitlePath)
+            .on('end', () => {
+                res.setHeader('Content-Type', 'text/vtt');
+                res.setHeader('Access-Control-Allow-Origin', '*');
+                res.sendFile(subtitlePath);
+            })
+            .on('error', (err) => {
+                console.error('Subtitle extraction error:', err);
+                res.status(500).send('Subtitle extraction failed');
+            })
+            .run();
+            
+    } catch (error) {
+        console.error('Subtitle serving error:', error);
+        res.status(500).send('Subtitle serving failed');
+    }
+});
+
+// Add subtitle info endpoint
+app.get('/api/subtitle-info/:filename(*)', async (req, res) => {
+    try {
+        const encodedPath = req.params.filename;
+        const decodedPath = safeDecodeFilePath(encodedPath);
+        const fullVideoPath = validateFilePath(decodedPath);
+        
+        if (!fs.existsSync(fullVideoPath)) {
+            return res.status(404).json({ error: 'Video file not found' });
+        }
+        
+        // Probe video for subtitle streams
+        ffmpeg.ffprobe(fullVideoPath, (err, metadata) => {
+            if (err) {
+                console.error('FFprobe error:', err);
+                return res.json({ subtitles: [] });
+            }
+            
+            const streams = metadata.streams || [];
+            const subtitleStreams = streams
+                .filter(stream => stream.codec_type === 'subtitle')
+                .map((stream, index) => ({
+                    index: stream.index,
+                    trackIndex: index,
+                    language: stream.tags?.language || 'unknown',
+                    title: stream.tags?.title || `Subtitle ${index + 1}`,
+                    codec: stream.codec_name,
+                    url: `/api/subtitle/${encodeURIComponent(decodedPath)}/${index}`
+                }));
+            
+            res.json({ subtitles: subtitleStreams });
+        });
+        
+    } catch (error) {
+        console.error('Subtitle info error:', error);
+        res.status(500).json({ error: 'Failed to get subtitle info' });
+    }
+});
+
+// Enhanced stream endpoint with better path handling
+// Update the file info to include subtitle information
+app.get('/api/info/:filename(*)', async (req, res) => {
+    try {
+        const encodedPath = req.params.filename;
+        const decodedPath = safeDecodeFilePath(encodedPath);
         const fullPath = validateFilePath(decodedPath);
-        console.log('Full file system path:', fullPath);
         
         if (!fs.existsSync(fullPath)) {
-            console.error('File not found:', fullPath);
-            return res.status(404).send('File not found');
+            return res.status(404).json({ error: 'File not found' });
         }
 
         if (!fs.statSync(fullPath).isFile()) {
-            console.error('Path is not a file:', fullPath);
-            return res.status(400).send('Path is not a file');
+            return res.status(400).json({ error: 'Path is not a file' });
         }
-
-        const stat = fs.statSync(fullPath);
-        const fileSize = stat.size;
-        const range = req.headers.range;
         
-        // Better MIME type detection
-        const ext = path.extname(fullPath).toLowerCase();
-        let contentType = 'video/mp4';
+        const stats = fs.statSync(fullPath);
         
-        switch (ext) {
-            case '.mp4': contentType = 'video/mp4'; break;
-            case '.avi': contentType = 'video/x-msvideo'; break;
-            case '.mkv': contentType = 'video/x-matroska'; break;
-            case '.mov': contentType = 'video/quicktime'; break;
-            case '.wmv': contentType = 'video/x-ms-wmv'; break;
-            case '.flv': contentType = 'video/x-flv'; break;
-            case '.webm': contentType = 'video/webm'; break;
-            case '.m4v': contentType = 'video/x-m4v'; break;
-        }
-
-        const protocol = req.secure ? 'HTTPS' : 'HTTP';
-        console.log(`[${new Date().toISOString()}] ${protocol} - User ${req.auth.user} streaming: ${decodedPath}`);
-        console.log(`File size: ${fileSize} bytes, Content-Type: ${contentType}`);
-
-        // Set CORS headers for video streaming
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Headers', 'Range');
-        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
-
-        if (range) {
-            console.log('Range request:', range);
-            const parts = range.replace(/bytes=/, "").split("-");
-            const start = parseInt(parts[0], 10);
-            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-            
-            if (start >= fileSize || end >= fileSize || start > end) {
-                console.error('Invalid range:', { start, end, fileSize });
-                return res.status(416).send('Range Not Satisfiable');
+        // Get subtitle info if it's a video file
+        let subtitleInfo = { subtitles: [] };
+        if (SUPPORTED_FORMATS.includes(path.extname(decodedPath).toLowerCase())) {
+            try {
+                const subtitleResponse = await new Promise((resolve) => {
+                    ffmpeg.ffprobe(fullPath, (err, metadata) => {
+                        if (err) {
+                            return resolve({ subtitles: [] });
+                        }
+                        
+                        const streams = metadata.streams || [];
+                        const subtitleStreams = streams
+                            .filter(stream => stream.codec_type === 'subtitle')
+                            .map((stream, index) => ({
+                                index: stream.index,
+                                trackIndex: index,
+                                language: stream.tags?.language || 'unknown',
+                                title: stream.tags?.title || `Subtitle ${index + 1}`,
+                                codec: stream.codec_name
+                            }));
+                        
+                        resolve({ subtitles: subtitleStreams });
+                    });
+                });
+                subtitleInfo = subtitleResponse;
+            } catch (subtitleError) {
+                console.error('Error getting subtitle info:', subtitleError);
             }
-            
-            const chunksize = (end - start) + 1;
-            console.log(`Serving range: ${start}-${end}/${fileSize} (${chunksize} bytes)`);
-            
-            const file = fs.createReadStream(fullPath, { start, end });
-            const head = {
-                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-                'Accept-Ranges': 'bytes',
-                'Content-Length': chunksize,
-                'Content-Type': contentType,
-                'Cache-Control': 'public, max-age=0',
-                'Access-Control-Allow-Origin': '*'
-            };
-            
-            res.writeHead(206, head);
-            
-            file.on('error', (error) => {
-                console.error('File stream error:', error);
-                if (!res.headersSent) {
-                    res.status(500).send('Stream error');
-                }
-            });
-            
-            file.on('end', () => {
-                console.log('Range request completed successfully');
-            });
-            
-            file.pipe(res);
-        } else {
-            console.log('Full file request');
-            const head = {
-                'Content-Length': fileSize,
-                'Content-Type': contentType,
-                'Accept-Ranges': 'bytes',
-                'Cache-Control': 'public, max-age=0',
-                'Access-Control-Allow-Origin': '*'
-            };
-            res.writeHead(200, head);
-            
-            const fileStream = fs.createReadStream(fullPath);
-            
-            fileStream.on('error', (error) => {
-                console.error('File stream error:', error);
-                if (!res.headersSent) {
-                    res.status(500).send('Stream error');
-                }
-            });
-            
-            fileStream.on('end', () => {
-                console.log('Full file request completed successfully');
-            });
-            
-            fileStream.pipe(res);
         }
+        
+        const info = {
+            name: path.basename(decodedPath),
+            path: decodedPath,
+            size: stats.size,
+            sizeFormatted: `${(stats.size / 1024 / 1024 / 1024).toFixed(2)} GB`,
+            created: stats.birthtime,
+            modified: stats.mtime,
+            extension: path.extname(decodedPath),
+            tags: movieTags[decodedPath] || [],
+            ...subtitleInfo
+        };
+        
+        res.json(info);
     } catch (error) {
-        console.error(`Stream error: ${error.message}`);
-        console.error('Stack trace:', error.stack);
-        res.status(500).json({ 
-            error: 'Stream failed', 
-            message: error.message,
-            path: req.params.filename 
-        });
+        console.error(`Error getting file info: ${error.message}`);
+        res.status(500).json({ error: 'Failed to get file info: ' + error.message });
     }
 });
 

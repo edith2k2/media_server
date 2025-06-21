@@ -14,18 +14,11 @@ import {
   Lock,
   AlertTriangle,
   Play,
-  Settings,
-  Star,
-  Heart,
-  Tv,
-  Calendar,
-  Clock,
-  HardDrive,
-  Users,
-  Zap
+  Settings
 } from 'lucide-react';
 
-const API_BASE = 'http://localhost:3001/api';
+// Updated API base for Vite proxy - no need for full URL
+const API_BASE = '/api';
 
 // Hook for API calls with authentication
 function useApi() {
@@ -63,50 +56,24 @@ function useApi() {
   return { apiCall, loading, error };
 }
 
-// Animated background component
-function AnimatedBackground() {
-  return (
-    <div className="fixed inset-0 overflow-hidden pointer-events-none">
-      <div className="absolute inset-0 bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900"></div>
-      
-      {/* Floating orbs */}
-      <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-gradient-to-r from-pink-500 to-violet-500 rounded-full opacity-20 blur-3xl animate-pulse"></div>
-      <div className="absolute bottom-1/4 right-1/4 w-80 h-80 bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full opacity-20 blur-3xl animate-pulse delay-1000"></div>
-      <div className="absolute top-1/2 left-1/2 w-64 h-64 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full opacity-15 blur-3xl animate-pulse delay-2000"></div>
-      
-      {/* Animated grid */}
-      <div className="absolute inset-0 bg-grid-pattern opacity-5"></div>
-    </div>
-  );
-}
-
 // Breadcrumb component
 function Breadcrumbs({ breadcrumbs, onNavigate }) {
   return (
-    <nav className="flex items-center gap-2 p-6 bg-gradient-to-r from-slate-800/80 to-slate-700/80 backdrop-blur-xl rounded-2xl mb-8 border border-slate-600/30 shadow-2xl">
+    <nav className="flex items-center gap-2 p-4 bg-gray-800 rounded-lg mb-6">
       {breadcrumbs.map((crumb, index) => (
         <React.Fragment key={crumb.path}>
-          {index > 0 && <ChevronRight className="w-4 h-4 text-cyan-400 animate-pulse" />}
+          {index > 0 && <ChevronRight className="w-4 h-4 text-gray-400" />}
           <button
             onClick={() => onNavigate(crumb.path)}
-            className={`group flex items-center gap-3 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300 ${
+            className={`flex items-center gap-2 px-3 py-1 rounded text-sm transition-colors ${
               index === breadcrumbs.length - 1
-                ? 'text-gray-400 cursor-default bg-slate-700/50'
-                : 'text-cyan-300 hover:text-white hover:bg-gradient-to-r hover:from-cyan-600/20 hover:to-blue-600/20 hover:shadow-lg hover:shadow-cyan-500/25 transform hover:scale-105'
+                ? 'text-gray-400 cursor-default'
+                : 'text-green-400 hover:bg-gray-700'
             }`}
             disabled={index === breadcrumbs.length - 1}
           >
-            {index === 0 ? (
-              <Home className="w-5 h-5 group-hover:rotate-12 transition-transform duration-300" />
-            ) : (
-              <Folder className="w-5 h-5 group-hover:rotate-12 transition-transform duration-300" />
-            )}
-            <span className="relative">
-              {crumb.name}
-              {index !== breadcrumbs.length - 1 && (
-                <span className="absolute inset-x-0 -bottom-1 h-0.5 bg-gradient-to-r from-cyan-500 to-blue-500 scale-x-0 group-hover:scale-x-100 transition-transform duration-300"></span>
-              )}
-            </span>
+            {index === 0 ? <Home className="w-4 h-4" /> : <Folder className="w-4 h-4" />}
+            {crumb.name}
           </button>
         </React.Fragment>
       ))}
@@ -127,68 +94,53 @@ function Controls({
   allTags 
 }) {
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 p-6 bg-gradient-to-r from-slate-800/90 to-slate-700/90 backdrop-blur-xl rounded-2xl mb-8 border border-slate-600/30 shadow-2xl">
-      {/* Search Box */}
-      <div className="relative group">
-        <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 text-cyan-400 group-focus-within:text-cyan-300 transition-colors duration-300" />
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 p-4 bg-gray-800 rounded-lg mb-6">
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
         <input
           type="text"
-          placeholder="🔍 Search your media..."
+          placeholder="Search files and folders..."
           value={searchTerm}
           onChange={(e) => onSearchChange(e.target.value)}
-          className="w-full pl-12 pr-4 py-3 bg-gradient-to-r from-slate-700/50 to-slate-600/50 border border-slate-500/30 rounded-xl text-white placeholder-slate-400 focus:outline-none focus:border-cyan-500 focus:ring-2 focus:ring-cyan-500/20 focus:bg-slate-700/70 transition-all duration-300 backdrop-blur-sm"
+          className="w-full pl-10 pr-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-green-500"
         />
-        <div className="absolute inset-0 rounded-xl bg-gradient-to-r from-cyan-500/10 to-blue-500/10 opacity-0 group-focus-within:opacity-100 transition-opacity duration-300 pointer-events-none"></div>
       </div>
 
-      {/* Sort Dropdown */}
-      <div className="relative group">
-        <select
-          value={sortBy}
-          onChange={(e) => onSortChange(e.target.value)}
-          className="w-full px-4 py-3 bg-gradient-to-r from-slate-700/50 to-slate-600/50 border border-slate-500/30 rounded-xl text-white focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all duration-300 appearance-none cursor-pointer backdrop-blur-sm"
-        >
-          <option value="name-asc">📝 Name A-Z</option>
-          <option value="name-desc">📝 Name Z-A</option>
-          <option value="modified-desc">📅 Newest First</option>
-          <option value="modified-asc">📅 Oldest First</option>
-          <option value="size-desc">📦 Largest First</option>
-          <option value="size-asc">📦 Smallest First</option>
-        </select>
-        <div className="absolute right-3 top-1/2 transform -translate-y-1/2 pointer-events-none">
-          <ChevronRight className="w-4 h-4 text-emerald-400 rotate-90" />
-        </div>
-      </div>
+      <select
+        value={sortBy}
+        onChange={(e) => onSortChange(e.target.value)}
+        className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-green-500"
+      >
+        <option value="name-asc">Name A-Z</option>
+        <option value="name-desc">Name Z-A</option>
+        <option value="modified-desc">Newest First</option>
+        <option value="modified-asc">Oldest First</option>
+        <option value="size-desc">Largest First</option>
+        <option value="size-asc">Smallest First</option>
+      </select>
 
-      {/* Filter Dropdown */}
-      <div className="relative group">
-        <select
-          value={filterBy}
-          onChange={(e) => onFilterChange(e.target.value)}
-          className="w-full px-4 py-3 bg-gradient-to-r from-slate-700/50 to-slate-600/50 border border-slate-500/30 rounded-xl text-white focus:outline-none focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all duration-300 appearance-none cursor-pointer backdrop-blur-sm"
-        >
-          <option value="">🎯 All Items</option>
-          <option value="folders">📁 Folders Only</option>
-          <option value="files">🎬 Files Only</option>
-          <option value="watched">👁️ Watched</option>
-          <option value="unwatched">🆕 Unwatched</option>
-          {allTags.map(tag => (
-            <option key={tag} value={tag}>🏷️ {tag}</option>
-          ))}
-        </select>
-        <div className="absolute right-3 top-1/2 transform -translate-y-1/2 pointer-events-none">
-          <ChevronRight className="w-4 h-4 text-purple-400 rotate-90" />
-        </div>
-      </div>
+      <select
+        value={filterBy}
+        onChange={(e) => onFilterChange(e.target.value)}
+        className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-green-500"
+      >
+        <option value="">All Items</option>
+        <option value="folders">Folders Only</option>
+        <option value="files">Files Only</option>
+        <option value="watched">Watched</option>
+        <option value="unwatched">Unwatched</option>
+        {allTags.map(tag => (
+          <option key={tag} value={tag}>{tag}</option>
+        ))}
+      </select>
 
-      {/* View Toggle */}
-      <div className="flex gap-3">
+      <div className="flex gap-2">
         <button
           onClick={() => onViewModeChange('grid')}
-          className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium transition-all duration-300 transform hover:scale-105 ${
+          className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
             viewMode === 'grid'
-              ? 'bg-gradient-to-r from-rose-600 to-pink-600 text-white shadow-lg shadow-rose-500/30 border border-rose-500/50'
-              : 'bg-slate-700/50 border border-slate-600/30 text-slate-300 hover:bg-gradient-to-r hover:from-rose-600/20 hover:to-pink-600/20 hover:text-rose-300 hover:border-rose-500/50'
+              ? 'bg-green-600 border-green-500 text-white'
+              : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
           }`}
         >
           <Grid className="w-4 h-4" />
@@ -196,10 +148,10 @@ function Controls({
         </button>
         <button
           onClick={() => onViewModeChange('list')}
-          className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium transition-all duration-300 transform hover:scale-105 ${
+          className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border transition-colors ${
             viewMode === 'list'
-              ? 'bg-gradient-to-r from-orange-600 to-amber-600 text-white shadow-lg shadow-orange-500/30 border border-orange-500/50'
-              : 'bg-slate-700/50 border border-slate-600/30 text-slate-300 hover:bg-gradient-to-r hover:from-orange-600/20 hover:to-amber-600/20 hover:text-orange-300 hover:border-orange-500/50'
+              ? 'bg-green-600 border-green-500 text-white'
+              : 'bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600'
           }`}
         >
           <List className="w-4 h-4" />
@@ -334,6 +286,7 @@ function TagEditor({ filePath, currentTags, onTagsChange }) {
 }
 
 // Video player component
+// Updated VideoPlayer component with subtitle support
 function VideoPlayer({ filePath, title }) {
   const [subtitles, setSubtitles] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -405,7 +358,7 @@ function VideoPlayer({ filePath, title }) {
   );
 }
 
-// Media item component
+// Enhanced MediaItem component to show subtitle availability
 function MediaItem({ item, viewMode, onNavigate, onTagsChange }) {
   const { apiCall } = useApi();
   const [tags, setTags] = useState(item.tags || []);
