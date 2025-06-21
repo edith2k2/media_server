@@ -16,6 +16,8 @@ import {
   Play,
   Settings
 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Download, Smartphone, Monitor, AlertCircle, PlayCircle, Tv } from 'lucide-react';
 
 // Updated API base for Vite proxy - no need for full URL
 const API_BASE = '/api';

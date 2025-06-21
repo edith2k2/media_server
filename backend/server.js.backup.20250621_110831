@@ -75,7 +75,7 @@ const corsOptions = {
             return callback(null, true);
         }
         
-        // For development, allow all origins
+        // For development, allow all origins (comment out for production)
         return callback(null, true);
     },
     credentials: true,
@@ -83,29 +83,10 @@ const corsOptions = {
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Range']
 };
+
 // Middleware
 app.use(cors(corsOptions));
 app.use(express.json());
-
-// Add device detection middleware
-function detectDevice(req, res, next) {
-    const userAgent = req.headers['user-agent'] || '';
-    
-    // More comprehensive mobile detection
-    req.isMobile = /Mobile|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Windows Phone/i.test(userAgent);
-    req.isSafari = /Safari/i.test(userAgent) && !/Chrome/i.test(userAgent);
-    req.isIOS = /iPhone|iPad|iPod/i.test(userAgent);
-    req.isAndroid = /Android/i.test(userAgent);
-    
-    // Log device info for debugging
-    console.log(`📱 Device detected - Mobile: ${req.isMobile}, iOS: ${req.isIOS}, Android: ${req.isAndroid}`);
-    
-    next();
-}
-
-// Apply device detection to all routes
-app.use(detectDevice);
-
 
 // Session configuration
 app.use(session({
@@ -665,15 +646,6 @@ app.get('/api/stream/:filename(*)', (req, res) => {
         
         // MIME type detection
         const ext = path.extname(fullPath).toLowerCase();
-
-        // Check if transcoding is needed for mobile devices
-        const needsTranscoding = req.isMobile && (ext === '.mkv' || ext === '.avi' || ext === '.wmv');
-        
-        if (needsTranscoding) {
-            console.log(`📱 Transcoding ${ext} for mobile device`);
-            return streamWithTranscoding(req, res, fullPath, decodedPath);
-        }
-
         let contentType = 'video/mp4';
         
         switch (ext) {
@@ -756,159 +728,6 @@ app.get('/api/stream/:filename(*)', (req, res) => {
             error: 'Stream failed', 
             message: error.message
         });
-    }
-});
-
-// Transcoding function for mobile devices
-// REPLACE your existing streamWithTranscoding function with this improved version
-
-function streamWithTranscoding(req, res, inputPath, displayPath) {
-    const range = req.headers.range;
-    
-    console.log(`🔄 Starting transcoding for: ${displayPath}`);
-    
-    // Set headers for MP4 streaming
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Range');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    
-    // Handle range requests by starting from beginning (transcoding limitation)
-    if (range) {
-        console.log('📱 Range request detected, but transcoding from start for mobile compatibility');
-    }
-    
-    // Check if input file exists and is readable
-    if (!fs.existsSync(inputPath)) {
-        console.error('❌ Input file not found:', inputPath);
-        return res.status(404).send('File not found');
-    }
-    
-    // More robust FFmpeg command with error handling
-    let ffmpegCommand;
-    
-    try {
-        ffmpegCommand = ffmpeg(inputPath)
-            .videoCodec('libx264')
-            .audioCodec('aac')
-            .format('mp4')
-            .addOptions([
-                '-preset veryfast',            // Faster than ultrafast but more stable
-                '-crf 28',                     // Slightly lower quality for faster encoding
-                '-profile:v main',             // More compatible than baseline
-                '-level 4.0',                  // Higher level for better compatibility
-                '-movflags +frag_keyframe+empty_moov+faststart', // Better streaming
-                '-pix_fmt yuv420p',           // Wide compatibility
-                '-max_muxing_queue_size 1024', // Smaller buffer to prevent memory issues
-                '-avoid_negative_ts make_zero', // Handle timing issues
-                '-fflags +genpts',            // Generate presentation timestamps
-                '-threads 0'                   // Use all available CPU cores
-            ])
-            // Add size/quality constraints for mobile
-            .size('1280x720')                 // Limit resolution for mobile
-            .videoBitrate('1000k')            // Limit bitrate
-            .audioBitrate('128k')             // Standard audio bitrate
-            .on('start', (commandLine) => {
-                console.log('📱 FFmpeg started with command:');
-                console.log(commandLine);
-            })
-            .on('progress', (progress) => {
-                if (progress.percent && progress.percent > 0) {
-                    console.log(`📱 Transcoding progress: ${Math.round(progress.percent)}%`);
-                } else if (progress.timemark) {
-                    console.log(`📱 Transcoding time: ${progress.timemark}`);
-                }
-            })
-            .on('stderr', (stderrLine) => {
-                // Log important stderr messages but not every line
-                if (stderrLine.includes('error') || stderrLine.includes('Error') || 
-                    stderrLine.includes('failed') || stderrLine.includes('Failed')) {
-                    console.error('📱 FFmpeg stderr:', stderrLine);
-                }
-            })
-            .on('error', (err, stdout, stderr) => {
-                console.error('📱 Transcoding error:', err.message);
-                console.error('📱 FFmpeg stdout:', stdout);
-                console.error('📱 FFmpeg stderr:', stderr);
-                
-                if (!res.headersSent) {
-                    // Send a more helpful error message
-                    if (err.message.includes('does not contain any stream')) {
-                        res.status(422).send('Video file appears to be corrupted or unreadable');
-                    } else if (err.message.includes('Permission denied')) {
-                        res.status(403).send('Permission denied accessing video file');
-                    } else if (err.message.includes('No such file')) {
-                        res.status(404).send('Video file not found');
-                    } else {
-                        res.status(500).send('Video transcoding failed - try downloading instead');
-                    }
-                }
-            })
-            .on('end', () => {
-                console.log('📱 Transcoding completed successfully');
-            });
-        
-        // Handle client disconnect
-        req.on('close', () => {
-            console.log('📱 Client disconnected, stopping transcoding');
-            if (ffmpegCommand) {
-                ffmpegCommand.kill('SIGTERM'); // More graceful than SIGKILL
-                setTimeout(() => {
-                    if (ffmpegCommand) {
-                        ffmpegCommand.kill('SIGKILL'); // Force kill if still running
-                    }
-                }, 2000);
-            }
-        });
-        
-        // Handle server errors
-        req.on('error', (err) => {
-            console.error('📱 Request error:', err);
-            if (ffmpegCommand) {
-                ffmpegCommand.kill('SIGTERM');
-            }
-        });
-        
-        // Start streaming
-        res.writeHead(200);
-        
-        // Pipe the transcoded stream to response
-        const stream = ffmpegCommand.pipe();
-        stream.pipe(res);
-        
-        // Handle stream errors
-        stream.on('error', (err) => {
-            console.error('📱 Stream error:', err);
-            if (!res.destroyed) {
-                res.destroy();
-            }
-        });
-        
-    } catch (error) {
-        console.error('📱 Failed to create FFmpeg command:', error);
-        if (!res.headersSent) {
-            res.status(500).send('Failed to initialize video transcoding');
-        }
-    }
-}
-
-app.get('/api/transcode-info/:filename(*)', (req, res) => {
-    try {
-        const encodedPath = req.params.filename;
-        const decodedPath = safeDecodeFilePath(encodedPath);
-        const ext = path.extname(decodedPath).toLowerCase();
-        
-        const needsTranscoding = req.isMobile && (ext === '.mkv' || ext === '.avi' || ext === '.wmv');
-        
-        res.json({
-            needsTranscoding,
-            isMobile: req.isMobile,
-            originalFormat: ext,
-            reason: needsTranscoding ? 'Mobile device detected with incompatible format' : 'Format compatible'
-        });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
     }
 });
 
@@ -1108,47 +927,4 @@ app.get('*', (req, res) => {
     // If it's an API route that doesn't exist, return 404
     res.status(404).json({ error: 'API endpoint not found' });
   }
-});
-
-app.get('/api/mobile-download/:filename(*)', (req, res) => {
-    try {
-        const encodedPath = req.params.filename;
-        const decodedPath = safeDecodeFilePath(encodedPath);
-        const fullPath = validateFilePath(decodedPath);
-        const username = req.auth.user;
-        
-        // Validate access
-        if (!validateFolderAccess(decodedPath, username)) {
-            return res.status(403).send('Access denied');
-        }
-        
-        if (!fs.existsSync(fullPath)) {
-            return res.status(404).send('File not found');
-        }
-        
-        const filename = path.basename(decodedPath);
-        const stats = fs.statSync(fullPath);
-        
-        console.log(`📱 Mobile download requested: ${decodedPath}`);
-        
-        res.setHeader('Content-Type', 'application/octet-stream');
-        res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
-        res.setHeader('Content-Length', stats.size);
-        res.setHeader('Cache-Control', 'no-cache');
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        
-        const fileStream = fs.createReadStream(fullPath);
-        fileStream.pipe(res);
-        
-        fileStream.on('error', (error) => {
-            console.error('📱 Mobile download error:', error);
-            if (!res.headersSent) {
-                res.status(500).send('Download failed');
-            }
-        });
-        
-    } catch (error) {
-        console.error('📱 Mobile download error:', error);
-        res.status(500).send('Download failed');
-    }
 });
