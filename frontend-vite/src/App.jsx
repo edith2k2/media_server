@@ -91,7 +91,9 @@ function Controls({
   onFilterChange, 
   viewMode, 
   onViewModeChange, 
-  allTags 
+  allTags,
+  subtitleSettings,
+  onSubtitleSettingsChange 
 }) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 p-4 bg-gray-800 rounded-lg mb-6">
@@ -132,6 +134,20 @@ function Controls({
         {allTags.map(tag => (
           <option key={tag} value={tag}>{tag}</option>
         ))}
+      </select>
+
+      <select
+        value={subtitleSettings.language}
+        onChange={(e) => onSubtitleSettingsChange({...subtitleSettings, language: e.target.value})}
+        className="px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-green-500"
+      >
+        <option value="all">All Subtitles</option>
+        <option value="en">English Only</option>
+        <option value="es">Spanish Only</option>
+        <option value="fr">French Only</option>
+        <option value="de">German Only</option>
+        <option value="ja">Japanese Only</option>
+        <option value="none">No Subtitles</option>
       </select>
 
       <div className="flex gap-2">
@@ -297,7 +313,7 @@ function TagEditor({ filePath, currentTags, onTagsChange }) {
 }
 
 // VideoPlayer component - only renders video when explicitly requested
-function VideoPlayer({ filePath, title, onClose }) {
+function VideoPlayer({ filePath, title, onClose, subtitleSettings }) {
   const [subtitles, setSubtitles] = useState([]);
   const [loadingSubtitles, setLoadingSubtitles] = useState(true);
   const encodedPath = encodeURIComponent(filePath);
@@ -313,12 +329,17 @@ function VideoPlayer({ filePath, title, onClose }) {
         
         if (response.ok) {
           const data = await response.json();
-          const englishSubtitles = (data.subtitles || []).filter(subtitle => 
-            subtitle.language === 'en' || 
-            subtitle.language === 'eng' ||
-            subtitle.language.toLowerCase().includes('english')
-          );
-          setSubtitles(englishSubtitles);
+          let filteredSubtitles = data.subtitles || [];
+          
+          // Filter by language preference
+          if (subtitleSettings.language !== 'all') {
+            filteredSubtitles = filteredSubtitles.filter(subtitle => {
+              const lang = subtitle.language?.toLowerCase() || '';
+              return lang === subtitleSettings.language || 
+                     lang.startsWith(subtitleSettings.language + '-');
+            });
+          }
+          setSubtitles(filteredSubtitles);
         }
       } catch (error) {
         console.error('Failed to load subtitle info:', error);
@@ -328,7 +349,7 @@ function VideoPlayer({ filePath, title, onClose }) {
     };
 
     loadSubtitles();
-  }, [encodedPath]);
+  }, [encodedPath, subtitleSettings]);
 
   return (
     <div className="relative">
@@ -380,6 +401,12 @@ function VideoPlayer({ filePath, title, onClose }) {
       {!loadingSubtitles && subtitles.length > 0 && (
         <div className="mt-2 text-xs text-gray-400">
           📝 {subtitles.length} subtitle track(s): {subtitles.map(s => s.language).join(', ')}
+        </div>
+      )}
+      
+      {!loadingSubtitles && subtitles.length === 0 && subtitleSettings.language !== 'none' && (
+        <div className="mt-2 text-xs text-gray-400">
+          No {subtitleSettings.language === 'all' ? '' : subtitleSettings.language} subtitles available
         </div>
       )}
     </div>
@@ -546,7 +573,7 @@ function PlayButton({ onClick, hasSubtitles, viewMode, filePath }) {
 }
 
 // Optimized MediaItem component - no unnecessary API calls
-function MediaItem({ item, viewMode, onNavigate, onTagsChange, isPlaying, onPlayToggle }) {
+function MediaItem({ item, viewMode, onNavigate, onTagsChange, isPlaying, onPlayToggle, subtitleSettings }) {
   const { apiCall } = useApi();
   const [tags, setTags] = useState(item.tags || []);
   const [watched, setWatched] = useState(item.watched || false);
@@ -650,6 +677,7 @@ function MediaItem({ item, viewMode, onNavigate, onTagsChange, isPlaying, onPlay
             filePath={item.path} 
             title={item.displayName}
             onClose={() => handleStopClick()}
+            subtitleSettings={subtitleSettings}
           />
         ) : (
           <PlayButton
@@ -729,6 +757,10 @@ export default function MediaBrowser() {
   const [user, setUser] = useState(null);
   const [currentlyPlaying, setCurrentlyPlaying] = useState(null);
   const { apiCall, loading, error } = useApi();
+  const [subtitleSettings, setSubtitleSettings] = useState({
+    language: 'all', // Default to all languages
+    enabled: true
+  });
 
   // Load data
   const loadData = useCallback(async (path = '') => {
@@ -885,6 +917,8 @@ export default function MediaBrowser() {
           viewMode={viewMode}
           onViewModeChange={setViewMode}
           allTags={data.allTags || []}
+          subtitleSettings={subtitleSettings}
+          onSubtitleSettingsChange={setSubtitleSettings}
         />
       )}
 
@@ -920,6 +954,7 @@ export default function MediaBrowser() {
                   setCurrentlyPlaying(null);
                 }
               }}
+              subtitleSettings={subtitleSettings}
             />
           ))}
         </div>
