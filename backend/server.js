@@ -545,6 +545,8 @@ app.get('/api/subtitle/:filename(*)/:track', async (req, res) => {
         const trackIndex = parseInt(req.params.track);
         const decodedPath = safeDecodeFilePath(encodedPath);
         const fullVideoPath = validateFilePath(decodedPath);
+
+        console.log(`Serving subtitle for video: ${decodedPath}, track index: ${trackIndex}`);
         
         if (!fs.existsSync(fullVideoPath)) {
             return res.status(404).send('Video file not found');
@@ -559,11 +561,29 @@ app.get('/api/subtitle/:filename(*)/:track', async (req, res) => {
         const videoBasename = path.basename(fullVideoPath, path.extname(fullVideoPath));
         const subtitlePath = path.join(tempDir, `${videoBasename}_${trackIndex}.vtt`);
         
+        // ADD THIS HELPER FUNCTION FOR CLEANING
+        const cleanSubtitleContent = (content) => {
+            return content
+                // Remove translator notes and alternatives in curly braces
+                .replace(/\{[^}]*\}/g, '')
+        };
+        
         // Check if subtitle already extracted
         if (fs.existsSync(subtitlePath)) {
-            res.setHeader('Content-Type', 'text/vtt');
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            return res.sendFile(subtitlePath);
+            // READ, CLEAN, AND SEND THE SUBTITLE
+            fs.readFile(subtitlePath, 'utf8', (err, data) => {
+                if (err) {
+                    console.error('Error reading subtitle file:', err);
+                    return res.status(500).send('Error reading subtitle file');
+                }
+                console.log(`Using cached subtitle for: ${decodedPath}, track index: ${trackIndex}`);
+                const cleanedContent = cleanSubtitleContent(data);
+                console.log('Sending cleaned subtitle content');
+                res.setHeader('Content-Type', 'text/vtt');
+                res.setHeader('Access-Control-Allow-Origin', '*');
+                res.send(cleanedContent);
+            });
+            return;
         }
         
         // Extract subtitle on demand
@@ -574,9 +594,20 @@ app.get('/api/subtitle/:filename(*)/:track', async (req, res) => {
             ])
             .output(subtitlePath)
             .on('end', () => {
-                res.setHeader('Content-Type', 'text/vtt');
-                res.setHeader('Access-Control-Allow-Origin', '*');
-                res.sendFile(subtitlePath);
+                // READ, CLEAN, AND SEND THE NEWLY EXTRACTED SUBTITLE
+                fs.readFile(subtitlePath, 'utf8', (err, data) => {
+                    if (err) {
+                        console.error('Error reading extracted subtitle:', err);
+                        return res.status(500).send('Error reading extracted subtitle');
+                    }
+                    
+                    const cleanedContent = cleanSubtitleContent(data);
+                    console.log(`cleanedContent`, cleanedContent);
+                    console.log(`Subtitle extracted and cleaned for: ${decodedPath}, track index: ${trackIndex}`);
+                    res.setHeader('Content-Type', 'text/vtt');
+                    res.setHeader('Access-Control-Allow-Origin', '*');
+                    res.send(cleanedContent);
+                });
             })
             .on('error', (err) => {
                 console.error('Subtitle extraction error:', err);
@@ -620,6 +651,8 @@ app.get('/api/subtitle-info/:filename(*)', async (req, res) => {
                     url: `/api/subtitle/${encodeURIComponent(decodedPath)}/${index}`
                 }));
             
+            console.log(`Found ${subtitleStreams.length} subtitle streams for: ${decodedPath}`);
+            console.log('Subtitle streams:', subtitleStreams);
             res.json({ subtitles: subtitleStreams });
         });
         
@@ -632,6 +665,7 @@ app.get('/api/subtitle-info/:filename(*)', async (req, res) => {
 // Stream video
 app.get('/api/stream/:filename(*)', (req, res) => {
     try {
+        // In your /api/stream route, add:
         const encodedPath = req.params.filename;
         console.log('Raw encoded path:', encodedPath);
         
@@ -642,7 +676,7 @@ app.get('/api/stream/:filename(*)', (req, res) => {
         console.log('Full file system path:', fullPath);
 
         const username = req.auth.user;
-        console.log(`User ${username} requested stream for: ${decodedPath}`);
+        console.log(`User ${username} requested stream for xxxxxx: ${decodedPath}`);
         // Validate folder access
         if (!validateFolderAccess(decodedPath, username)) {
             console.error(`Access denied for user ${username} to path: ${decodedPath}`);
@@ -667,12 +701,12 @@ app.get('/api/stream/:filename(*)', (req, res) => {
         const ext = path.extname(fullPath).toLowerCase();
 
         // Check if transcoding is needed for mobile devices
-        const needsTranscoding = req.isMobile && (ext === '.mkv' || ext === '.avi' || ext === '.wmv');
+        // const needsTranscoding = req.isMobile && (ext === '.mkv' || ext === '.avi' || ext === '.wmv');
         
-        if (needsTranscoding) {
-            console.log(`📱 Transcoding ${ext} for mobile device`);
-            return streamWithTranscoding(req, res, fullPath, decodedPath);
-        }
+        // if (needsTranscoding) {
+        //     console.log(`📱 Transcoding ${ext} for mobile device`);
+        //     return streamWithTranscoding(req, res, fullPath, decodedPath);
+        // }
 
         let contentType = 'video/mp4';
         

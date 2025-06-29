@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { 
   Search, 
   Folder, 
@@ -16,8 +16,6 @@ import {
   Play,
   Settings
 } from 'lucide-react';
-import React, { useState, useEffect } from 'react';
-import { Download, Smartphone, Monitor, AlertCircle, PlayCircle, Tv } from 'lucide-react';
 
 // Updated API base for Vite proxy - no need for full URL
 const API_BASE = '/api';
@@ -266,6 +264,17 @@ function TagEditor({ filePath, currentTags, onTagsChange }) {
             ))}
           </div>
 
+          <div className="flex flex-wrap gap-2 mb-3">
+            {currentTags.map(tag => (
+              <TagBadge
+                key={tag}
+                tag={tag}
+                onClick={() => removeTag(tag)}
+                onRemove={() => removeTag(tag)}
+              />
+            ))}
+          </div>
+
           <form onSubmit={handleAddCustomTag} className="flex gap-2">
             <input
               type="text"
@@ -287,15 +296,14 @@ function TagEditor({ filePath, currentTags, onTagsChange }) {
   );
 }
 
-// Video player component
-// Updated VideoPlayer component with subtitle support
-function VideoPlayer({ filePath, title }) {
+// VideoPlayer component - only renders video when explicitly requested
+function VideoPlayer({ filePath, title, onClose }) {
   const [subtitles, setSubtitles] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loadingSubtitles, setLoadingSubtitles] = useState(true);
   const encodedPath = encodeURIComponent(filePath);
   const streamUrl = `${API_BASE}/stream/${encodedPath}`;
 
-  // Load subtitle information
+  // Load subtitle information only when player is actually rendered
   useEffect(() => {
     const loadSubtitles = async () => {
       try {
@@ -305,12 +313,17 @@ function VideoPlayer({ filePath, title }) {
         
         if (response.ok) {
           const data = await response.json();
-          setSubtitles(data.subtitles || []);
+          const englishSubtitles = (data.subtitles || []).filter(subtitle => 
+            subtitle.language === 'en' || 
+            subtitle.language === 'eng' ||
+            subtitle.language.toLowerCase().includes('english')
+          );
+          setSubtitles(englishSubtitles);
         }
       } catch (error) {
         console.error('Failed to load subtitle info:', error);
       } finally {
-        setLoading(false);
+        setLoadingSubtitles(false);
       }
     };
 
@@ -319,6 +332,14 @@ function VideoPlayer({ filePath, title }) {
 
   return (
     <div className="relative">
+      {/* Close button */}
+      <button
+        onClick={onClose}
+        className="absolute top-2 right-2 z-10 bg-red-600 hover:bg-red-500 text-white rounded-full w-8 h-8 flex items-center justify-center transition-colors"
+      >
+        ×
+      </button>
+      
       <video
         controls
         preload="metadata"
@@ -326,11 +347,16 @@ function VideoPlayer({ filePath, title }) {
         onError={(e) => {
           console.error('Video error for:', filePath, e);
         }}
-        crossOrigin="anonymous" // Required for subtitle loading
+        crossOrigin="anonymous"
+        autoPlay // Start playing when loaded
       >
         <source src={streamUrl} type="video/mp4" />
         <source src={streamUrl} type="video/webm" />
         <source src={streamUrl} type="video/x-matroska" />
+        <source src={streamUrl} type="video/mkv" />
+        <source src={streamUrl} type="video/avi" />
+        <source src={streamUrl} type="video/mov" />
+        <source src={streamUrl} type="video/quicktime" />
         
         {/* Add subtitle tracks */}
         {subtitles.map((subtitle, index) => (
@@ -340,7 +366,7 @@ function VideoPlayer({ filePath, title }) {
             src={`${API_BASE}/subtitle/${encodedPath}/${subtitle.trackIndex}`}
             srcLang={subtitle.language}
             label={subtitle.title}
-            default={index === 0} // Make first subtitle track default
+            default={index === 0}
           />
         ))}
         
@@ -351,7 +377,7 @@ function VideoPlayer({ filePath, title }) {
       </video>
       
       {/* Show subtitle info */}
-      {subtitles.length > 0 && (
+      {!loadingSubtitles && subtitles.length > 0 && (
         <div className="mt-2 text-xs text-gray-400">
           📝 {subtitles.length} subtitle track(s): {subtitles.map(s => s.language).join(', ')}
         </div>
@@ -360,35 +386,194 @@ function VideoPlayer({ filePath, title }) {
   );
 }
 
-// Enhanced MediaItem component to show subtitle availability
-function MediaItem({ item, viewMode, onNavigate, onTagsChange }) {
+// Play button component - shows before video loads
+function PlayButton({ onClick, hasSubtitles, viewMode, filePath }) {
+  const [thumbnail, setThumbnail] = useState(null);
+  const [thumbnailLoaded, setThumbnailLoaded] = useState(false);
+  const [isVisible, setIsVisible] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
+  const buttonRef = useRef(null);
+
+  // Check if thumbnail is already cached
+  const getCachedThumbnail = useCallback((path) => {
+    return sessionStorage.getItem(`thumb_${btoa(path)}`);
+  }, []);
+
+  const setCachedThumbnail = useCallback((path, dataURL) => {
+    try {
+      sessionStorage.setItem(`thumb_${btoa(path)}`, dataURL);
+    } catch (error) {
+      console.warn('Failed to cache thumbnail:', error);
+    }
+  }, []);
+
+  // Intersection Observer for lazy loading
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setIsVisible(true);
+          observer.disconnect();
+        }
+      },
+      { threshold: 0.1 }
+    );
+
+    if (buttonRef.current) {
+      observer.observe(buttonRef.current);
+    }
+
+    return () => observer.disconnect();
+  }, []);
+
+  // Generate thumbnail only when needed
+  useEffect(() => {
+    if (!filePath || !isVisible || thumbnailLoaded) return;
+    
+    // Check cache first
+    const cached = getCachedThumbnail(filePath);
+    if (cached) {
+      setThumbnail(cached);
+      setThumbnailLoaded(true);
+      return;
+    }
+
+    // Only generate on hover or after delay
+    const generateThumbnail = () => {
+      const encodedPath = encodeURIComponent(filePath);
+      const streamUrl = `${API_BASE}/stream/${encodedPath}`;
+      
+      const video = document.createElement('video');
+      video.crossOrigin = 'anonymous';
+      video.preload = 'metadata';
+      video.muted = true;
+      video.volume = 0;
+      
+      let timeoutId;
+      
+      const cleanup = () => {
+        clearTimeout(timeoutId);
+        video.remove();
+        setThumbnailLoaded(true);
+      };
+
+      video.addEventListener('loadedmetadata', () => {
+        // Seek to a good frame (avoid black frames at start)
+        const seekTime = Math.min(video.duration * 0.1, 30); // Max 30 seconds
+        video.currentTime = seekTime;
+      });
+      
+      video.addEventListener('seeked', () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = 320;
+          canvas.height = 180;
+          const ctx = canvas.getContext('2d');
+          
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const dataURL = canvas.toDataURL('image/jpeg', 0.6); // Lower quality
+          
+          setThumbnail(dataURL);
+          setCachedThumbnail(filePath, dataURL);
+        } catch (error) {
+          console.error('Failed to generate thumbnail:', error);
+        } finally {
+          cleanup();
+        }
+      });
+      
+      video.addEventListener('error', cleanup);
+      
+      // Timeout fallback
+      timeoutId = setTimeout(cleanup, 10000); // 10 second timeout
+      
+      video.src = streamUrl;
+    };
+
+    if (isHovered) {
+      generateThumbnail();
+    } else {
+      // Delay generation to avoid loading all at once
+      const timer = setTimeout(generateThumbnail, Math.random() * 2000 + 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [filePath, isVisible, thumbnailLoaded, isHovered, getCachedThumbnail, setCachedThumbnail]);
+
+  return (
+    <div 
+      ref={buttonRef}
+      className={`bg-gray-700 rounded-lg flex flex-col items-center justify-center cursor-pointer hover:bg-gray-600 transition-colors relative overflow-hidden ${
+        viewMode === 'grid' ? 'h-48' : 'h-18'
+      }`}
+      onClick={onClick}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={() => setIsHovered(false)}
+    >
+      {thumbnail ? (
+        <>
+          <img 
+            src={thumbnail} 
+            alt="Video preview"
+            className="absolute inset-0 w-full h-full object-cover"
+            loading="lazy"
+          />
+          <div className="absolute inset-0 bg-black bg-opacity-40 flex flex-col items-center justify-center">
+            <Play className="w-12 h-12 text-white drop-shadow-lg" />
+            {viewMode === 'grid' && (
+              <p className="text-white text-sm mt-2 drop-shadow-lg">Click to play</p>
+            )}
+          </div>
+        </>
+      ) : (
+        <>
+          <Play className="w-12 h-12 text-green-500 mb-2" />
+          {viewMode === 'grid' && (
+            <div className="text-center">
+              <p className="text-gray-300 text-sm">Click to play</p>
+              {hasSubtitles && (
+                <p className="text-blue-400 text-xs mt-1">📝 CC Available</p>
+              )}
+            </div>
+          )}
+        </>
+      )}
+      
+      {hasSubtitles && (
+        <span className="absolute top-1 right-1 text-blue-400 text-xs bg-black bg-opacity-60 px-1 rounded">📝</span>
+      )}
+    </div>
+  );
+}
+
+// Optimized MediaItem component - no unnecessary API calls
+function MediaItem({ item, viewMode, onNavigate, onTagsChange, isPlaying, onPlayToggle }) {
   const { apiCall } = useApi();
   const [tags, setTags] = useState(item.tags || []);
   const [watched, setWatched] = useState(item.watched || false);
-  const [hasSubtitles, setHasSubtitles] = useState(false);
+  const [subtitleInfo, setSubtitleInfo] = useState(null);
+  const [subtitleInfoLoaded, setSubtitleInfoLoaded] = useState(false);
 
-  // Check for subtitles when component loads
-  useEffect(() => {
-    if (item.type === 'file') {
-      const checkSubtitles = async () => {
-        try {
-          const encodedPath = encodeURIComponent(item.path);
-          const response = await fetch(`${API_BASE}/subtitle-info/${encodedPath}`, {
-            credentials: 'include'
-          });
-          
-          if (response.ok) {
-            const data = await response.json();
-            setHasSubtitles(data.subtitles && data.subtitles.length > 0);
-          }
-        } catch (error) {
-          console.error('Failed to check subtitles:', error);
-        }
-      };
-
-      checkSubtitles();
+  // Only check for subtitles when user shows interest (hover or click)
+  const checkSubtitles = useCallback(async () => {
+    if (subtitleInfoLoaded || item.type !== 'file') return;
+    
+    try {
+      const encodedPath = encodeURIComponent(item.path);
+      const response = await fetch(`${API_BASE}/subtitle-info/${encodedPath}`, {
+        credentials: 'include'
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        setSubtitleInfo(data.subtitles || []);
+      }
+    } catch (error) {
+      console.error('Failed to check subtitles:', error);
+      setSubtitleInfo([]);
+    } finally {
+      setSubtitleInfoLoaded(true);
     }
-  }, [item.path, item.type]);
+  }, [item.path, item.type, subtitleInfoLoaded]);
 
   const toggleWatched = async () => {
     try {
@@ -412,6 +597,18 @@ function MediaItem({ item, viewMode, onNavigate, onTagsChange }) {
     if (onTagsChange) {
       onTagsChange(newTags);
     }
+  };
+
+  const handlePlayClick = () => {
+    onPlayToggle(item.path, true);
+    // Check for subtitles when user actually wants to play
+    if (!subtitleInfoLoaded) {
+      checkSubtitles();
+    }
+  };
+
+  const handleStopClick = () => {
+    onPlayToggle(item.path, false);
   };
 
   const downloadUrl = `${API_BASE}/download/${encodeURIComponent(item.path)}`;
@@ -440,25 +637,37 @@ function MediaItem({ item, viewMode, onNavigate, onTagsChange }) {
   }
 
   return (
-    <div className={`bg-gray-800 rounded-lg border border-gray-700 hover:border-green-500 transition-all ${
-      viewMode === 'list' ? 'flex gap-4 p-4' : 'p-4'
-    }`}>
-      {viewMode === 'grid' && (
-        <VideoPlayer filePath={item.path} title={item.displayName} />
-      )}
-      
-      <div className={viewMode === 'list' ? 'flex-1' : ''}>
-        {viewMode === 'list' && (
-          <div className="w-32 h-18 mb-4">
-            <VideoPlayer filePath={item.path} title={item.displayName} />
-          </div>
+    <div 
+      className={`bg-gray-800 rounded-lg border border-gray-700 hover:border-green-500 transition-all ${
+        viewMode === 'list' ? 'flex gap-4 p-4' : 'p-4'
+      }`}
+      onMouseEnter={checkSubtitles} // Check subtitles on hover for better UX
+    >
+      {/* Video preview/play area */}
+      <div className={viewMode === 'list' ? 'w-32 h-18 mb-4' : 'mb-4'}>
+        {isPlaying ? (
+          <VideoPlayer 
+            filePath={item.path} 
+            title={item.displayName}
+            onClose={() => handleStopClick()}
+          />
+        ) : (
+          <PlayButton
+            onClick={handlePlayClick}
+            hasSubtitles={subtitleInfo && subtitleInfo.length > 0}
+            viewMode={viewMode}
+            filePath={item.path}
+          />
         )}
-        
+      </div>
+      
+
+      <div className={viewMode === 'list' ? 'flex-1' : ''}>
         <div className="flex items-center gap-3 mb-2">
           <Film className="w-5 h-5 text-green-500" />
           <h3 className="text-lg font-semibold text-white">{item.displayName}</h3>
-          {/* Show subtitle indicator */}
-          {hasSubtitles && (
+          {/* Show subtitle indicator only after checking */}
+          {subtitleInfo && subtitleInfo.length > 0 && (
             <span className="px-2 py-1 bg-blue-600 text-white text-xs rounded-full">
               📝 CC
             </span>
@@ -468,7 +677,7 @@ function MediaItem({ item, viewMode, onNavigate, onTagsChange }) {
         <div className="text-sm text-gray-400 mb-3">
           <p>Size: {item.sizeFormatted}</p>
           <p>Modified: {new Date(item.modified).toLocaleDateString()}</p>
-          {hasSubtitles && <p>📝 Subtitles available</p>}
+          {subtitleInfo && subtitleInfo.length > 0 && <p>📝 Subtitles available</p>}
         </div>
 
         <div className="flex flex-wrap gap-2 mb-3">
@@ -518,6 +727,7 @@ export default function MediaBrowser() {
   const [filterBy, setFilterBy] = useState('');
   const [viewMode, setViewMode] = useState('grid');
   const [user, setUser] = useState(null);
+  const [currentlyPlaying, setCurrentlyPlaying] = useState(null);
   const { apiCall, loading, error } = useApi();
 
   // Load data
@@ -619,6 +829,7 @@ export default function MediaBrowser() {
   }, [loadUser, loadData]);
 
   const handleNavigate = (path) => {
+    setCurrentlyPlaying(null); // Stop any playing video when navigating
     loadData(path);
   };
 
@@ -701,6 +912,14 @@ export default function MediaBrowser() {
               item={item}
               viewMode={viewMode}
               onNavigate={handleNavigate}
+              isPlaying={currentlyPlaying === item.path}
+              onPlayToggle={(path, shouldPlay) => {
+                if (shouldPlay) {
+                  setCurrentlyPlaying(path);
+                } else {
+                  setCurrentlyPlaying(null);
+                }
+              }}
             />
           ))}
         </div>
