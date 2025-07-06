@@ -1041,10 +1041,7 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: 'Internal server error' });
 });
 
-// 404 handler
-app.use((req, res) => {
-    res.status(404).json({ error: 'Endpoint not found' });
-});
+
 
 // Start servers
 function startServer() {
@@ -1133,16 +1130,6 @@ process.on('unhandledRejection', (reason, promise) => {
     process.exit(1);
 });
 
-// Serve React app for all non-API routes (this must be the LAST route)
-app.get('*', (req, res) => {
-  // Only serve React app for non-API routes
-  if (!req.path.startsWith('/api')) {
-    res.sendFile(path.join(__dirname, '../frontend-vite/dist/index.html'));
-  } else {
-    // If it's an API route that doesn't exist, return 404
-    res.status(404).json({ error: 'API endpoint not found' });
-  }
-});
 
 app.get('/api/mobile-download/:filename(*)', (req, res) => {
     try {
@@ -1185,4 +1172,32 @@ app.get('/api/mobile-download/:filename(*)', (req, res) => {
         console.error('📱 Mobile download error:', error);
         res.status(500).send('Download failed');
     }
+});
+
+// Serve React app for all non-API routes (this must be the LAST route)
+app.get('*', (req, res) => {
+  console.log(`🎯 Catch-all route hit for path: ${req.path}`);
+  
+  // Only serve React app for non-API routes
+  if (!req.path.startsWith('/api')) {
+    const indexPath = path.join(__dirname, '../frontend-vite/dist/index.html');
+    console.log(`📄 Serving React app from: ${indexPath}`);
+    
+    // Check if the file exists
+    if (fs.existsSync(indexPath)) {
+      console.log(`✅ index.html exists, serving it`);
+      res.sendFile(indexPath);
+    } else {
+      console.log(`❌ index.html not found at: ${indexPath}`);
+      res.status(404).send(`React app not found at: ${indexPath}`);
+    }
+  } else {
+    console.log(`🚫 API route not found: ${req.path}`);
+    res.status(404).json({ error: 'API endpoint not found' });
+  }
+});
+
+// 404 handler
+app.use((req, res) => {
+    res.status(404).json({ error: 'Endpoint not found' });
 });

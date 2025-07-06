@@ -529,44 +529,56 @@ function PlayButton({ onClick, hasSubtitles, viewMode, filePath }) {
   return (
     <div 
       ref={buttonRef}
-      className={`bg-gray-700 rounded-lg flex flex-col items-center justify-center cursor-pointer hover:bg-gray-600 transition-colors relative overflow-hidden ${
+      className={`bg-gray-700 rounded-lg cursor-pointer hover:bg-gray-600 transition-colors relative overflow-hidden ${
         viewMode === 'grid' ? 'h-48' : 'h-18'
       }`}
       onClick={onClick}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
-      {thumbnail ? (
-        <>
-          <img 
-            src={thumbnail} 
-            alt="Video preview"
-            className="absolute inset-0 w-full h-full object-cover"
-            loading="lazy"
-          />
-          <div className="absolute inset-0 bg-black bg-opacity-40 flex flex-col items-center justify-center">
-            <Play className="w-12 h-12 text-white drop-shadow-lg" />
-            {viewMode === 'grid' && (
-              <p className="text-white text-sm mt-2 drop-shadow-lg">Click to play</p>
-            )}
-          </div>
-        </>
-      ) : (
-        <>
-          <Play className="w-12 h-12 text-green-500 mb-2" />
+      {/* Background thumbnail (always absolute to prevent size changes) */}
+      {thumbnail && (
+        <img 
+          src={thumbnail} 
+          alt="Video preview"
+          className="absolute inset-0 w-full h-full object-cover"
+          loading="lazy"
+        />
+      )}
+      
+      {/* Overlay content (always absolute to maintain consistent sizing) */}
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        {/* Dark overlay for better contrast when thumbnail is present */}
+        {thumbnail && (
+          <div className="absolute inset-0 bg-black bg-opacity-40" />
+        )}
+        
+        {/* Content layer */}
+        <div className="relative z-10 flex flex-col items-center justify-center">
+          <Play className={`w-12 h-12 drop-shadow-lg ${
+            thumbnail ? 'text-white' : 'text-green-500'
+          }`} />
+          
           {viewMode === 'grid' && (
-            <div className="text-center">
-              <p className="text-gray-300 text-sm">Click to play</p>
-              {hasSubtitles && (
+            <div className="text-center mt-2">
+              <p className={`text-sm drop-shadow-lg ${
+                thumbnail ? 'text-white' : 'text-gray-300'
+              }`}>
+                Click to play
+              </p>
+              {hasSubtitles && !thumbnail && (
                 <p className="text-blue-400 text-xs mt-1">📝 CC Available</p>
               )}
             </div>
           )}
-        </>
-      )}
+        </div>
+      </div>
       
+      {/* Subtitle indicator (always in same position) */}
       {hasSubtitles && (
-        <span className="absolute top-1 right-1 text-blue-400 text-xs bg-black bg-opacity-60 px-1 rounded">📝</span>
+        <span className="absolute top-1 right-1 text-blue-400 text-xs bg-black bg-opacity-60 px-1 rounded z-20">
+          📝
+        </span>
       )}
     </div>
   );
@@ -579,6 +591,8 @@ function MediaItem({ item, viewMode, onNavigate, onTagsChange, isPlaying, onPlay
   const [watched, setWatched] = useState(item.watched || false);
   const [subtitleInfo, setSubtitleInfo] = useState(null);
   const [subtitleInfoLoaded, setSubtitleInfoLoaded] = useState(false);
+
+  console.log('Rendering MediaItem:', item.path, 'isPlaying:', isPlaying);
 
   // Only check for subtitles when user shows interest (hover or click)
   const checkSubtitles = useCallback(async () => {
