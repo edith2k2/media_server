@@ -14,47 +14,15 @@ import {
   Lock,
   AlertTriangle,
   Play,
-  Settings
+  Settings,
+  Plus,
+  Upload,
+  FolderPlus,
+  X,
+  CheckCircle
 } from 'lucide-react';
-
-// Updated API base for Vite proxy - no need for full URL
-const API_BASE = '/api';
-
-// Hook for API calls with authentication
-function useApi() {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-
-  const apiCall = useCallback(async (endpoint, options = {}) => {
-    setLoading(true);
-    setError(null);
-    
-    try {
-      const response = await fetch(`${API_BASE}${endpoint}`, {
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          ...options.headers
-        },
-        ...options
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      return data;
-    } catch (err) {
-      setError(err.message);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  return { apiCall, loading, error };
-}
+import { UploadModal, FloatingUploadButton } from './components/Upload';
+import { useApi, API_BASE } from './utils/Api';
 
 // Breadcrumb component
 function Breadcrumbs({ breadcrumbs, onNavigate }) {
@@ -592,7 +560,7 @@ function MediaItem({ item, viewMode, onNavigate, onTagsChange, isPlaying, onPlay
   const [subtitleInfo, setSubtitleInfo] = useState(null);
   const [subtitleInfoLoaded, setSubtitleInfoLoaded] = useState(false);
 
-  console.log('Rendering MediaItem:', item.path, 'isPlaying:', isPlaying);
+  // console.log('Rendering MediaItem:', item.path, 'isPlaying:', isPlaying);
 
   // Only check for subtitles when user shows interest (hover or click)
   const checkSubtitles = useCallback(async () => {
@@ -775,6 +743,8 @@ export default function MediaBrowser() {
     language: 'all', // Default to all languages
     enabled: true
   });
+  const [showUploadModal, setShowUploadModal] = useState(false);
+
 
   // Load data
   const loadData = useCallback(async (path = '') => {
@@ -782,6 +752,7 @@ export default function MediaBrowser() {
       const result = await apiCall(`/browse?path=${encodeURIComponent(path)}`);
       setData(result);
       setCurrentPath(path);
+      console.log('loadData - setting currentPath to:', path); // DEBUG LOG
     } catch (error) {
       console.error('Failed to load data:', error);
     }
@@ -875,6 +846,8 @@ export default function MediaBrowser() {
   }, [loadUser, loadData]);
 
   const handleNavigate = (path) => {
+    setCurrentPath(path);
+    console.log('Navigating to path:', path); // DEBUG LOG
     setCurrentlyPlaying(null); // Stop any playing video when navigating
     loadData(path);
   };
@@ -894,6 +867,15 @@ export default function MediaBrowser() {
       </div>
     );
   }
+  const handleUploadComplete = () => {
+    // Refresh the current directory to show new files
+    loadData(currentPath);
+  };
+  const handleOpenUpload = () => {
+    if (data) { // Only open if data is loaded
+      setShowUploadModal(true);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gray-900 text-white p-6">
@@ -972,6 +954,20 @@ export default function MediaBrowser() {
             />
           ))}
         </div>
+      )}
+      {/* Upload Modal */}
+      <UploadModal
+        isOpen={showUploadModal}
+        onClose={() => setShowUploadModal(false)}
+        data={data} 
+        onUploadComplete={handleUploadComplete}
+      />
+      
+      {/* Floating Upload Button */}
+      {data && (
+        <FloatingUploadButton
+          onClick={() => setShowUploadModal(true)}
+        />
       )}
     </div>
   );

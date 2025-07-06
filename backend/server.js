@@ -9,6 +9,11 @@ const rateLimit = require('express-rate-limit');
 const session = require('express-session');
 const ffmpeg = require('fluent-ffmpeg');
 const { spawn } = require('child_process');
+// Add multer for file uploads
+const multer = require('multer');
+const { promisify } = require('util');
+const pipeline = promisify(require('stream').pipeline);
+
 
 const app = express();
 const HTTP_PORT = 3001;
@@ -162,6 +167,309 @@ function sanitizePath(inputPath) {
     const sanitized = inputPath.replace(/\.\./g, '').replace(/\/+/g, '/');
     return sanitized.startsWith('/') ? sanitized.substring(1) : sanitized;
 }
+
+const tempUploadDir = path.join(MEDIA_ROOT, '.temp-uploads');
+
+// Ensure temp directory exists on external volume
+if (!fs.existsSync(tempUploadDir)) {
+    try {
+        fs.mkdirSync(tempUploadDir, { recursive: true });
+        console.log('📁 Created temp upload directory on external volume:', tempUploadDir);
+    } catch (error) {
+        console.error('❌ Failed to create temp directory on external volume:', error);
+        console.log('⚠️  Falling back to local temp directory');
+        // Fallback to local temp if external volume has issues
+        tempUploadDir = path.join(__dirname, 'temp-uploads');
+        fs.mkdirSync(tempUploadDir, { recursive: true });
+    }
+}
+
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        try {
+            const currentPath = req.body.currentPath || '';
+            
+            // DEBUG LOGS
+            console.log('📁 === MULTER DESTINATION DEBUG ===');
+            console.log('📁 Raw currentPath from form:', JSON.stringify(currentPath));
+            console.log('📁 MEDIA_ROOT:', MEDIA_ROOT);
+            
+            // This combines MEDIA_ROOT + currentPath
+            const uploadPath = validateDirectoryPath(currentPath);
+            console.log('📁 Combined uploadPath:', uploadPath);
+            console.log('📁 Directory exists:', fs.existsSync(uploadPath));
+            
+            // Create directory if it doesn't exist
+            if (!fs.existsSync(uploadPath)) {
+                console.log('📁 Creating directory tree...');
+                fs.mkdirSync(uploadPath, { recursive: true });
+                console.log('📁 Directory created successfully');
+            }
+            
+            // Test write permissions
+            try {
+                fs.accessSync(uploadPath, fs.constants.W_OK);
+                console.log('📁 Directory is writable ✅');
+            } catch (permError) {
+                console.error('📁 Directory write permission error:', permError);
+                throw new Error('Upload directory is not writable');
+            }
+            
+            console.log('📁 === END MULTER DEBUG ===');
+            cb(null, uploadPath);
+            
+        } catch (error) {
+            console.error('📁 Multer destination error:', error);
+            cb(error, null);
+        }
+    },
+    filename: function (req, file, cb) {
+        const safeName = file.originalname.replace(/[^a-zA-Z0-9.\-_\[\]\(\) ]/g, '_');
+        console.log('📁 Original filename:', file.originalname);
+        console.log('📁 Safe filename:', safeName);
+        cb(null, safeName);
+    }
+});
+
+
+const upload = multer({
+    dest: tempUploadDir, // Temporary directory
+    limits: {
+        fileSize: 50 * 1024 * 1024 * 1024, // 50GB limit
+        files: 100 // Max 100 files at once
+    },
+    fileFilter: (req, file, cb) => {
+        // Allow all file types for now
+        cb(null, true);
+    }
+});
+
+
+// Upload files endpoint
+app.post('/api/upload', upload.array('files'), async (req, res) => {
+    console.log('\n🚀 === UPLOAD ENDPOINT START ===');
+    
+    try {
+        const username = req.auth.user;
+        const currentPath = req.body.currentPath || '';
+        
+        console.log('🔧 UPLOAD REQUEST INFO:');
+        console.log('  👤 User:', username);
+        console.log('  📂 Received currentPath:', JSON.stringify(currentPath));
+        console.log('  📄 Files count:', req.files?.length || 0);
+        console.log('  📁 Temp directory:', tempUploadDir);
+        
+        // Validate folder access
+        if (!validateFolderAccess(currentPath, username)) {
+            console.log('❌ Access denied for user', username, 'to path:', currentPath);
+            return res.status(403).json({ error: 'Access denied to upload location' });
+        }
+        
+        // Get the final destination directory
+        const finalUploadPath = validateDirectoryPath(currentPath);
+        console.log('  📂 Final upload path:', finalUploadPath);
+        
+        // Check if temp and final are on same filesystem
+        const tempStat = fs.statSync(tempUploadDir);
+        const finalStat = fs.statSync(path.dirname(finalUploadPath));
+        const sameFilesystem = tempStat.dev === finalStat.dev;
+        console.log('  📊 Same filesystem:', sameFilesystem);
+        
+        // Ensure destination directory exists
+        if (!fs.existsSync(finalUploadPath)) {
+            console.log('📁 Creating destination directory...');
+            fs.mkdirSync(finalUploadPath, { recursive: true });
+        }
+        
+        // Process each file
+        const uploadedFiles = [];
+        
+        for (const file of req.files) {
+            const safeName = file.originalname.replace(/[^a-zA-Z0-9.\-_\[\]\(\) ]/g, '_');
+            const tempPath = file.path;
+            const finalPath = path.join(finalUploadPath, safeName);
+            
+            console.log(`📄 Processing file: ${file.originalname}`);
+            console.log(`  - From: ${tempPath}`);
+            console.log(`  - To: ${finalPath}`);
+            
+            try {
+                if (sameFilesystem) {
+                    // Fast move on same filesystem
+                    console.log(`  - Moving file (same filesystem)...`);
+                    fs.renameSync(tempPath, finalPath);
+                } else {
+                    // Cross-filesystem copy + delete
+                    console.log(`  - Copying file (cross-filesystem)...`);
+                    fs.copyFileSync(tempPath, finalPath);
+                    fs.unlinkSync(tempPath);
+                }
+                
+                // Verify the operation worked
+                const fileExists = fs.existsSync(finalPath);
+                const fileStats = fileExists ? fs.statSync(finalPath) : null;
+                
+                console.log(`  - File operation successful: ${fileExists}`);
+                console.log(`  - Final file size: ${fileStats ? fileStats.size : 'N/A'} bytes`);
+                console.log(`  - Expected size: ${file.size} bytes`);
+                
+                if (!fileExists || (fileStats && fileStats.size !== file.size)) {
+                    throw new Error(`File verification failed - size mismatch or file missing`);
+                }
+                
+                uploadedFiles.push({
+                    originalName: file.originalname,
+                    filename: safeName,
+                    size: fileStats.size,
+                    path: path.join(currentPath, safeName).replace(/\\/g, '/'),
+                    success: true
+                });
+                
+            } catch (fileError) {
+                console.error(`❌ Failed to process file ${file.originalname}:`, fileError);
+                
+                // Clean up on error
+                try {
+                    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+                    if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
+                } catch (cleanupError) {
+                    console.error('Cleanup error:', cleanupError);
+                }
+                
+                throw new Error(`Failed to save file ${file.originalname}: ${fileError.message}`);
+            }
+        }
+        
+        console.log(`✅ Successfully uploaded ${uploadedFiles.length} files to: ${finalUploadPath}`);
+        console.log('🚀 === UPLOAD ENDPOINT END ===\n');
+        
+        res.json({
+            success: true,
+            message: `Successfully uploaded ${uploadedFiles.length} file(s) to ${currentPath || 'root'}`,
+            files: uploadedFiles,
+            uploadPath: finalUploadPath,
+            sameFilesystem: sameFilesystem
+        });
+        
+    } catch (error) {
+        console.error('❌ UPLOAD ERROR:', error);
+        
+        // Clean up any remaining temp files
+        if (req.files) {
+            req.files.forEach(file => {
+                try {
+                    if (fs.existsSync(file.path)) {
+                        fs.unlinkSync(file.path);
+                        console.log(`🧹 Cleaned up temp file: ${file.path}`);
+                    }
+                } catch (cleanupError) {
+                    console.error('Failed to cleanup temp file:', cleanupError);
+                }
+            });
+        }
+        
+        console.log('🚀 === UPLOAD ENDPOINT END (ERROR) ===\n');
+        
+        res.status(500).json({ 
+            error: 'Upload failed', 
+            message: error.message
+        });
+    }
+});
+
+
+// Optional: Clean up old temp files on server start
+const cleanupTempFiles = () => {
+    try {
+        if (!fs.existsSync(tempUploadDir)) return;
+        
+        const files = fs.readdirSync(tempUploadDir);
+        let cleanedCount = 0;
+        
+        files.forEach(file => {
+            try {
+                const filePath = path.join(tempUploadDir, file);
+                const stats = fs.statSync(filePath);
+                const now = new Date();
+                const fileAge = now - stats.mtime;
+                
+                // Delete files older than 1 hour
+                if (fileAge > 60 * 60 * 1000) {
+                    fs.unlinkSync(filePath);
+                    cleanedCount++;
+                }
+            } catch (fileError) {
+                console.error(`Error processing temp file ${file}:`, fileError);
+            }
+        });
+        
+        if (cleanedCount > 0) {
+            console.log(`🧹 Cleaned up ${cleanedCount} old temp files from external volume`);
+        }
+    } catch (error) {
+        console.error('Error cleaning temp files:', error);
+    }
+};
+
+// Clean up temp files on startup
+cleanupTempFiles();
+
+// Optional: Set up periodic cleanup (every hour)
+setInterval(cleanupTempFiles, 60 * 60 * 1000);
+
+
+// Create directory endpoint
+app.post('/api/create-directory', (req, res) => {
+    try {
+        const { directoryName, currentPath = '' } = req.body;
+        const username = req.auth.user;
+        
+        if (!directoryName || !directoryName.trim()) {
+            return res.status(400).json({ error: 'Directory name is required' });
+        }
+        
+        // Sanitize directory name
+        const safeDirName = directoryName.trim().replace(/[<>:"/\\|?*]/g, '_');
+        
+        // Validate folder access
+        if (!validateFolderAccess(currentPath, username)) {
+            return res.status(403).json({ error: 'Access denied to create directory here' });
+        }
+        
+        const parentPath = validateDirectoryPath(currentPath);
+        const newDirPath = path.join(parentPath, safeDirName);
+        
+        // Check if directory already exists
+        if (fs.existsSync(newDirPath)) {
+            return res.status(409).json({ error: 'Directory already exists' });
+        }
+        
+        // Create directory
+        fs.mkdirSync(newDirPath, { recursive: true });
+        
+        console.log(`[${new Date().toISOString()}] User ${username} created directory: ${path.join(currentPath, safeDirName)}`);
+        
+        res.json({
+            success: true,
+            message: `Directory "${safeDirName}" created successfully`,
+            directoryName: safeDirName,
+            path: path.join(currentPath, safeDirName).replace(/\\/g, '/')
+        });
+        
+    } catch (error) {
+        console.error('Create directory error:', error);
+        res.status(500).json({ 
+            error: 'Failed to create directory', 
+            message: error.message 
+        });
+    }
+});
+
+// Get upload progress (for future enhancement)
+app.get('/api/upload-progress/:sessionId', (req, res) => {
+    // This could be enhanced to track upload progress
+    res.json({ progress: 0, status: 'pending' });
+});
 
 function safeEncodeFilePath(filePath) {
     return filePath.split('/').map(segment => {
