@@ -11,8 +11,8 @@ const app = express();
 const HTTP_PORT = 3000;
 const HTTPS_PORT = 3443;
 
-// Change this to your movies folder path
-const MOVIES_FOLDER = '/Volumes/VAMSHI/VAMSHI/anime and series/.temp';
+// Change this to your media root folder path
+const MEDIA_ROOT = '/Volumes/VAMSHI/VAMSHI/';
 const SUPPORTED_FORMATS = ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm', '.m4v'];
 
 // SSL Certificate paths
@@ -84,66 +84,178 @@ app.use(express.json());
 // app.use(limiter);
 app.use(basicAuth);
 
-// Security functions
-function sanitizeFilename(filename) {
-    const sanitized = path.basename(filename);
-    if (!/^[a-zA-Z0-9\s.\-_()]+$/.test(sanitized)) {
-        throw new Error('Invalid filename');
-    }
-    return sanitized;
-}
-
-function validateFilePath(filename) {
-    const sanitizedFilename = sanitizeFilename(filename);
-    const filePath = path.resolve(path.join(MOVIES_FOLDER, sanitizedFilename));
-    const moviesPath = path.resolve(MOVIES_FOLDER);
+// Enhanced path sanitization and encoding functions
+function sanitizePath(inputPath) {
+    if (!inputPath) return '';
     
-    if (!filePath.startsWith(moviesPath)) {
-        throw new Error('Access denied');
-    }
-    return filePath;
+    // Remove any path traversal attempts but preserve legitimate characters
+    const sanitized = inputPath.replace(/\.\./g, '').replace(/\/+/g, '/');
+    return sanitized.startsWith('/') ? sanitized.substring(1) : sanitized;
 }
 
-// Enhanced movie information
-function getMovies() {
+// New function to safely encode file paths for URLs
+function safeEncodeFilePath(filePath) {
+    // Split path into segments and encode each segment separately
+    return filePath.split('/').map(segment => {
+        // Use encodeURIComponent but handle special cases
+        return encodeURIComponent(segment)
+            .replace(/'/g, '%27')
+            .replace(/\(/g, '%28')
+            .replace(/\)/g, '%29')
+            .replace(/\[/g, '%5B')
+            .replace(/\]/g, '%5D')
+            .replace(/!/g, '%21')
+            .replace(/\*/g, '%2A');
+    }).join('/');
+}
+
+// Enhanced decode function for stream endpoint
+function safeDecodeFilePath(encodedPath) {
     try {
-        if (!fs.existsSync(MOVIES_FOLDER)) {
-            console.error('Movies folder does not exist:', MOVIES_FOLDER);
-            return [];
+        // First decode normally
+        let decoded = decodeURIComponent(encodedPath);
+        
+        // Handle any remaining encoded characters that might cause issues
+        decoded = decoded
+            .replace(/%5B/gi, '[')
+            .replace(/%5D/gi, ']')
+            .replace(/%28/gi, '(')
+            .replace(/%29/gi, ')')
+            .replace(/%21/gi, '!')
+            .replace(/%2A/gi, '*')
+            .replace(/%27/gi, "'");
+            
+        return decoded;
+    } catch (error) {
+        console.error('Error decoding path:', encodedPath, error);
+        // Fallback to basic decoding
+        return encodedPath.replace(/%20/g, ' ');
+    }
+}
+
+function validateDirectoryPath(relativePath) {
+    const sanitizedPath = sanitizePath(relativePath);
+    const fullPath = path.resolve(path.join(MEDIA_ROOT, sanitizedPath));
+    const rootPath = path.resolve(MEDIA_ROOT);
+    
+    if (!fullPath.startsWith(rootPath)) {
+        throw new Error('Access denied: Path outside of media root');
+    }
+    
+    return fullPath;
+}
+
+function validateFilePath(relativePath) {
+    return validateDirectoryPath(relativePath);
+}
+
+// Get directory contents (both folders and media files) - FIXED VERSION
+function getDirectoryContents(relativePath = '') {
+    try {
+        const fullPath = validateDirectoryPath(relativePath);
+        
+        if (!fs.existsSync(fullPath)) {
+            console.error('Directory does not exist:', fullPath);
+            return { folders: [], files: [], currentPath: relativePath };
+        }
+
+        if (!fs.statSync(fullPath).isDirectory()) {
+            throw new Error('Path is not a directory');
         }
         
-        const files = fs.readdirSync(MOVIES_FOLDER);
-        return files
-            .filter(file => SUPPORTED_FORMATS.includes(path.extname(file).toLowerCase()))
-            .map(file => {
-                try {
-                    const filePath = path.join(MOVIES_FOLDER, file);
-                    const stats = fs.statSync(filePath);
-                    const extension = path.extname(file).toLowerCase();
-                    const nameWithoutExt = path.basename(file, extension);
+        const items = fs.readdirSync(fullPath);
+        const folders = [];
+        const files = [];
+        
+        items.forEach(item => {
+            try {
+                const itemPath = path.join(fullPath, item);
+                const stats = fs.statSync(itemPath);
+                // Changed variable name from relativePath to itemRelativePath to avoid shadowing
+                const itemRelativePath = path.join(relativePath, item).replace(/\\/g, '/');
+                
+                if (stats.isDirectory()) {
+                    // Count media files in subdirectory
+                    let mediaCount = 0;
+                    try {
+                        const subItems = fs.readdirSync(itemPath);
+                        mediaCount = subItems.filter(subItem => {
+                            const subItemPath = path.join(itemPath, subItem);
+                            try {
+                                const subStats = fs.statSync(subItemPath);
+                                return subStats.isFile() && SUPPORTED_FORMATS.includes(path.extname(subItem).toLowerCase());
+                            } catch {
+                                return false;
+                            }
+                        }).length;
+                    } catch {
+                        mediaCount = 0;
+                    }
                     
-                    return {
-                        name: file,
+                    folders.push({
+                        name: item,
+                        path: itemRelativePath,
+                        type: 'folder',
+                        modified: stats.mtime,
+                        mediaCount: mediaCount
+                    });
+                } else if (SUPPORTED_FORMATS.includes(path.extname(item).toLowerCase())) {
+                    const extension = path.extname(item).toLowerCase();
+                    const nameWithoutExt = path.basename(item, extension);
+                    const fullRelativePath = path.join(relativePath, item).replace(/\\/g, '/');
+                    
+                    files.push({
+                        name: item,
                         displayName: nameWithoutExt,
-                        path: file,
+                        path: fullRelativePath,
+                        type: 'file',
                         size: stats.size,
                         sizeFormatted: `${(stats.size / 1024 / 1024 / 1024).toFixed(1)} GB`,
                         modified: stats.mtime,
                         created: stats.birthtime,
                         extension: extension,
-                        tags: movieTags[file] || [],
-                        watched: (movieTags[file] || []).includes('watched')
-                    };
-                } catch (error) {
-                    console.error(`Error reading file ${file}:`, error);
-                    return null;
+                        tags: movieTags[fullRelativePath] || [],
+                        watched: (movieTags[fullRelativePath] || []).includes('watched')
+                    });
                 }
-            })
-            .filter(movie => movie !== null);
+            } catch (error) {
+                console.error(`Error reading item ${item}:`, error);
+            }
+        });
+        
+        // Sort folders first, then files, both alphabetically
+        folders.sort((a, b) => a.name.localeCompare(b.name));
+        files.sort((a, b) => a.name.localeCompare(b.name));
+        
+        return {
+            folders,
+            files,
+            currentPath: relativePath
+        };
     } catch (error) {
-        console.error('Error reading movies folder:', error);
-        return [];
+        console.error('Error reading directory:', error);
+        return { folders: [], files: [], currentPath: relativePath };
     }
+}
+
+// Generate breadcrumb navigation
+function generateBreadcrumbs(currentPath) {
+    const breadcrumbs = [{ name: 'Home', path: '' }];
+    
+    if (currentPath && currentPath !== '') {
+        const pathParts = currentPath.split('/').filter(part => part !== '');
+        let accumulatedPath = '';
+        
+        pathParts.forEach(part => {
+            accumulatedPath = accumulatedPath ? `${accumulatedPath}/${part}` : part;
+            breadcrumbs.push({
+                name: part,
+                path: accumulatedPath
+            });
+        });
+    }
+    
+    return breadcrumbs;
 }
 
 // Get all available tags
@@ -157,9 +269,77 @@ function getAllTags() {
     return Array.from(tags).sort();
 }
 
-// Main page with advanced UI
+
+// Add subtitle extraction function
+async function extractSubtitles(videoPath, outputDir) {
+    return new Promise((resolve, reject) => {
+        const subtitleTracks = [];
+        
+        // First, probe the video to find subtitle streams
+        ffmpeg.ffprobe(videoPath, (err, metadata) => {
+            if (err) {
+                console.error('FFprobe error:', err);
+                return resolve([]); // No subtitles available
+            }
+            
+            const streams = metadata.streams || [];
+            const subtitleStreams = streams.filter(stream => 
+                stream.codec_type === 'subtitle' && 
+                (stream.codec_name === 'subrip' || stream.codec_name === 'ass' || stream.codec_name === 'webvtt')
+            );
+            
+            if (subtitleStreams.length === 0) {
+                return resolve([]); // No subtitle streams found
+            }
+            
+            // Extract each subtitle stream
+            let extractionPromises = [];
+            
+            subtitleStreams.forEach((stream, index) => {
+                const language = stream.tags?.language || `track${index}`;
+                const title = stream.tags?.title || `Subtitle ${index + 1}`;
+                const outputPath = path.join(outputDir, `subtitle_${index}.vtt`);
+                
+                const extractionPromise = new Promise((resolveExtraction, rejectExtraction) => {
+                    ffmpeg(videoPath)
+                        .outputOptions([
+                            `-map 0:s:${index}`, // Map subtitle stream
+                            '-c:s webvtt'        // Convert to WebVTT format
+                        ])
+                        .output(outputPath)
+                        .on('end', () => {
+                            subtitleTracks.push({
+                                index: index,
+                                language: language,
+                                title: title,
+                                path: outputPath,
+                                url: `/api/subtitle/${encodeURIComponent(path.relative(MEDIA_ROOT, videoPath))}/${index}`
+                            });
+                            resolveExtraction();
+                        })
+                        .on('error', (extractErr) => {
+                            console.error(`Subtitle extraction error for stream ${index}:`, extractErr);
+                            resolveExtraction(); // Don't fail the whole process
+                        })
+                        .run();
+                });
+                
+                extractionPromises.push(extractionPromise);
+            });
+            
+            Promise.all(extractionPromises).then(() => {
+                resolve(subtitleTracks);
+            });
+        });
+    });
+}
+
+
+// Main page with file system browser
 app.get('/', (req, res) => {
-    const movies = getMovies();
+    const currentPath = req.query.path || '';
+    const contents = getDirectoryContents(currentPath);
+    const breadcrumbs = generateBreadcrumbs(currentPath);
     const allTags = getAllTags();
     const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
     
@@ -167,7 +347,7 @@ app.get('/', (req, res) => {
     <!DOCTYPE html>
     <html>
     <head>
-        <title>📱 Advanced Media Server</title>
+        <title>📁 File System Media Server</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
             * { box-sizing: border-box; }
@@ -188,6 +368,38 @@ app.get('/', (req, res) => {
                 background: rgba(255,255,255,0.1);
                 border-radius: 12px;
                 backdrop-filter: blur(10px);
+            }
+
+            .breadcrumbs {
+                background: rgba(255,255,255,0.05);
+                padding: 15px;
+                border-radius: 8px;
+                margin-bottom: 20px;
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                flex-wrap: wrap;
+            }
+
+            .breadcrumb {
+                color: #4CAF50;
+                text-decoration: none;
+                padding: 5px 10px;
+                border-radius: 4px;
+                transition: background 0.2s;
+            }
+
+            .breadcrumb:hover {
+                background: rgba(76, 175, 80, 0.2);
+            }
+
+            .breadcrumb.current {
+                color: #888;
+                pointer-events: none;
+            }
+
+            .breadcrumb-separator {
+                color: #666;
             }
 
             .controls {
@@ -240,14 +452,14 @@ app.get('/', (req, res) => {
             }
 
             /* Grid View */
-            .movies-grid {
+            .content-grid {
                 display: grid;
                 grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
                 gap: 20px;
             }
 
             /* List View */
-            .movies-list .movie {
+            .content-list .item {
                 display: flex;
                 align-items: center;
                 gap: 20px;
@@ -255,46 +467,66 @@ app.get('/', (req, res) => {
                 margin-bottom: 15px;
             }
 
-            .movies-list .movie-content {
+            .content-list .item-content {
                 flex: 1;
                 min-width: 0;
             }
 
-            .movies-list video {
+            .content-list video {
                 width: 150px;
                 height: 85px;
                 object-fit: cover;
             }
 
-            /* Card View (Default) */
-            .movie {
+            /* Item styles */
+            .item {
                 background: rgba(51,51,51,0.8);
                 border-radius: 12px;
                 border: 1px solid rgba(255,255,255,0.1);
                 transition: transform 0.2s ease, box-shadow 0.2s ease;
                 position: relative;
                 overflow: hidden;
+                cursor: pointer;
             }
 
-            .movie:hover {
+            .item:hover {
                 transform: translateY(-4px);
                 box-shadow: 0 8px 25px rgba(0,0,0,0.3);
             }
 
-            .movie-header {
+            .item.folder {
+                border-left: 4px solid #FF9800;
+            }
+
+            .item.file {
+                border-left: 4px solid #4CAF50;
+            }
+
+            .item-header {
                 padding: 15px;
                 border-bottom: 1px solid rgba(255,255,255,0.1);
             }
 
-            .movie-title {
+            .item-title {
                 margin: 0 0 8px 0;
                 color: #4CAF50;
                 font-size: 1.1em;
                 font-weight: 600;
                 word-break: break-word;
+                display: flex;
+                align-items: center;
+                gap: 8px;
             }
 
-            .movie-info {
+            .item.folder .item-title {
+                color: #FF9800;
+            }
+
+            .item-icon {
+                font-size: 1.2em;
+            }
+
+            .item-info {
                 display: flex;
                 justify-content: space-between;
                 align-items: center;
@@ -303,7 +535,7 @@ app.get('/', (req, res) => {
                 margin-bottom: 10px;
             }
 
-            .movie-tags {
+            .item-tags {
                 display: flex;
                 flex-wrap: wrap;
                 gap: 5px;
@@ -324,8 +556,15 @@ app.get('/', (req, res) => {
             .tag.series { background: #9C27B0; }
             .tag.movie { background: #FF9800; }
 
-            .movie-content {
+            .item-content {
                 padding: 15px;
+            }
+
+            .folder-info {
+                color: #888;
+                font-size: 0.9em;
+                text-align: center;
+                padding: 20px;
             }
 
             video {
@@ -336,7 +575,7 @@ app.get('/', (req, res) => {
                 margin-bottom: 15px;
             }
 
-            .movie-actions {
+            .item-actions {
                 display: flex;
                 gap: 10px;
                 flex-wrap: wrap;
@@ -423,49 +662,94 @@ app.get('/', (req, res) => {
                 grid-column: 1 / -1;
             }
 
+            .empty-folder {
+                text-align: center;
+                padding: 60px 20px;
+                color: #888;
+                background: rgba(255,255,255,0.05);
+                border-radius: 12px;
+                margin: 20px 0;
+            }
+
+            .debug-info {
+                font-size: 0.8em;
+                color: #666;
+                margin-bottom: 10px;
+                padding: 8px;
+                background: rgba(255,255,255,0.05);
+                border-radius: 4px;
+                font-family: monospace;
+            }
+
+            .error-message {
+                padding: 15px;
+                background: rgba(244, 67, 54, 0.2);
+                border: 1px solid #f44336;
+                border-radius: 8px;
+                margin: 10px 0;
+                color: #f44336;
+            }
+
             @media (max-width: 768px) {
                 body { padding: 10px; }
                 .controls {
                     grid-template-columns: 1fr;
                     gap: 10px;
                 }
-                .movies-grid {
+                .content-grid {
                     grid-template-columns: 1fr;
                 }
-                .movies-list .movie {
+                .content-list .item {
                     flex-direction: column;
                     align-items: flex-start;
                 }
-                .movies-list video {
+                .content-list video {
                     width: 100%;
                     height: auto;
+                }
+                .breadcrumbs {
+                    font-size: 0.9em;
                 }
             }
         </style>
     </head>
     <body>
         <div class="header">
-            <h1>📱 Advanced Media Server</h1>
-            <div>User: ${req.auth.user} • ${movies.length} movies</div>
+            <h1>📁 File System Media Server</h1>
+            <div>User: ${req.auth.user} • ${contents.folders.length} folders • ${contents.files.length} files</div>
             <div style="margin-top: 8px; padding: 8px; border-radius: 6px; background: ${isSecure ? 'rgba(76, 175, 80, 0.2)' : 'rgba(244, 67, 54, 0.2)'}; border: 1px solid ${isSecure ? '#4CAF50' : '#f44336'};">
                 ${isSecure ? '🔒 Secure HTTPS Connection' : '⚠️ UNENCRYPTED HTTP - Your data is visible to others!'}
             </div>
         </div>
 
+        <nav class="breadcrumbs">
+            ${breadcrumbs.map((crumb, index) => {
+                const isLast = index === breadcrumbs.length - 1;
+                return `
+                    ${index > 0 ? '<span class="breadcrumb-separator">›</span>' : ''}
+                    <a href="/?path=${encodeURIComponent(crumb.path)}" class="breadcrumb ${isLast ? 'current' : ''}">
+                        ${index === 0 ? '🏠' : '📁'} ${crumb.name}
+                    </a>
+                `;
+            }).join('')}
+        </nav>
+
         <div class="controls">
-            <input type="text" class="search-box" placeholder="🔍 Search movies..." id="searchBox">
+            <input type="text" class="search-box" placeholder="🔍 Search files and folders..." id="searchBox">
             
             <select class="sort-select" id="sortSelect">
-                <option value="modified-desc">📅 Newest First</option>
-                <option value="modified-asc">📅 Oldest First</option>
                 <option value="name-asc">🔤 Name A-Z</option>
                 <option value="name-desc">🔤 Name Z-A</option>
+                <option value="modified-desc">📅 Newest First</option>
+                <option value="modified-asc">📅 Oldest First</option>
                 <option value="size-desc">📦 Largest First</option>
                 <option value="size-asc">📦 Smallest First</option>
             </select>
 
             <select class="filter-select" id="filterSelect">
-                <option value="">📋 All Movies</option>
+                <option value="">📋 All Items</option>
+                <option value="folders">📁 Folders Only</option>
+                <option value="files">📄 Files Only</option>
                 <option value="watched">👀 Watched</option>
                 <option value="unwatched">🆕 Unwatched</option>
                 ${allTags.map(tag => `<option value="${tag}">🏷️ ${tag}</option>`).join('')}
@@ -478,67 +762,141 @@ app.get('/', (req, res) => {
         </div>
 
         <div class="stats" id="statsDisplay">
-            Showing ${movies.length} movies
+            Showing ${contents.folders.length} folders and ${contents.files.length} files
         </div>
 
-        <div class="movies-container" id="moviesContainer">
-            <div class="movies-grid" id="moviesGrid">
-                ${movies.map(movie => {
-                    const safeId = movie.path.replace(/[^a-zA-Z0-9]/g, '');
-                    const safePath = movie.path.replace(/'/g, "\\'");
-                    return `
-                    <div class="movie" data-name="${movie.displayName.toLowerCase()}" data-tags="${movie.tags.join(',')}" data-size="${movie.size}" data-modified="${new Date(movie.modified).getTime()}">
-                        <div class="movie-header">
-                            <h3 class="movie-title">${movie.displayName}</h3>
-                            <div class="movie-info">
-                                <span class="size">${movie.sizeFormatted}</span>
-                                <span class="date">${new Date(movie.modified).toLocaleDateString()}</span>
-                            </div>
-                            <div class="movie-tags">
-                                ${movie.tags.map(tag => `<span class="tag ${tag}">${tag}</span>`).join('')}
-                            </div>
-                        </div>
-                        
-                        <div class="movie-content">
-                            <video controls preload="metadata" poster="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIwIiBoZWlnaHQ9IjE4MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjMzMzIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxOCIgZmlsbD0iIzY2NiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPkNsaWNrIHRvIFBsYXk8L3RleHQ+PC9zdmc+">
-                                <source src="/stream/${encodeURIComponent(movie.path)}" type="video/mp4">
-                                Your browser doesn't support video streaming.
-                            </video>
-                            
-                            <div class="movie-actions">
-                                <a href="/download/${encodeURIComponent(movie.path)}" class="btn">⬇️ Download</a>
-                                <button class="btn btn-secondary" onclick="toggleWatched('${safePath}')">
-                                    ${movie.watched ? '👁️ Watched' : '👀 Mark Watched'}
-                                </button>
-                                <button class="btn btn-secondary" onclick="toggleTagEditor('${safeId}')">🏷️ Tags</button>
-                                <a href="/info/${encodeURIComponent(movie.path)}" class="btn btn-secondary">ℹ️ Info</a>
-                            </div>
-
-                            <div class="tag-editor" id="tagEditor-${safeId}">
-                                <div class="quick-tags">
-                                    <button class="quick-tag" onclick="addQuickTag('${safePath}', 'favorite')">⭐ Favorite</button>
-                                    <button class="quick-tag" onclick="addQuickTag('${safePath}', 'series')">📺 Series</button>
-                                    <button class="quick-tag" onclick="addQuickTag('${safePath}', 'movie')">🎬 Movie</button>
-                                    <button class="quick-tag" onclick="addQuickTag('${safePath}', 'action')">💥 Action</button>
-                                    <button class="quick-tag" onclick="addQuickTag('${safePath}', 'comedy')">😂 Comedy</button>
+        <div class="content-container" id="contentContainer">
+            ${contents.folders.length === 0 && contents.files.length === 0 ? `
+                <div class="empty-folder">
+                    <h3>📂 Empty Folder</h3>
+                    <p>This directory contains no media files or subdirectories.</p>
+                </div>
+            ` : `
+                <div class="content-grid" id="contentGrid">
+                    ${contents.folders.map(folder => `
+                        <div class="item folder" data-name="${folder.name.toLowerCase()}" data-type="folder" data-modified="${new Date(folder.modified).getTime()}" onclick="navigateToFolder('${folder.path}')">
+                            <div class="item-header">
+                                <h3 class="item-title">
+                                    <span class="item-icon">📁</span>
+                                    ${folder.name}
+                                </h3>
+                                <div class="item-info">
+                                    <span>${folder.mediaCount} media files</span>
+                                    <span>${new Date(folder.modified).toLocaleDateString()}</span>
                                 </div>
-                                <input type="text" class="tag-input" placeholder="Add custom tag..." 
-                                       onkeypress="if(event.key==='Enter') addCustomTag('${safePath}', this.value)">
+                            </div>
+                            <div class="item-content">
+                                <div class="folder-info">
+                                    <p>📂 Click to browse this folder</p>
+                                    <p>${folder.mediaCount} media files inside</p>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                `}).join('')}
-            </div>
+                    `).join('')}
+                    
+                    ${contents.files.map(file => {
+                        const safeId = file.path.replace(/[^a-zA-Z0-9]/g, '');
+                        const safePath = file.path.replace(/'/g, "\\'");
+                        
+                        // Use the new safe encoding function for URLs
+                        const encodedPath = file.path.split('/').map(segment => 
+                            encodeURIComponent(segment)
+                                .replace(/'/g, '%27')
+                                .replace(/\(/g, '%28')
+                                .replace(/\)/g, '%29')
+                                .replace(/\[/g, '%5B')
+                                .replace(/\]/g, '%5D')
+                                .replace(/!/g, '%21')
+                                .replace(/\*/g, '%2A')
+                        ).join('/');
+                        
+                        return `
+                        <div class="item file" data-name="${file.displayName.toLowerCase()}" data-type="file" data-tags="${file.tags.join(',')}" data-size="${file.size}" data-modified="${new Date(file.modified).getTime()}">
+                            <div class="item-header">
+                                <h3 class="item-title">
+                                    <span class="item-icon">🎬</span>
+                                    ${file.displayName}
+                                </h3>
+                                <div class="item-info">
+                                    <span class="size">${file.sizeFormatted}</span>
+                                    <span class="date">${new Date(file.modified).toLocaleDateString()}</span>
+                                </div>
+                                <div class="item-tags">
+                                    ${file.tags.map(tag => `<span class="tag ${tag}">${tag}</span>`).join('')}
+                                </div>
+                            </div>
+                            
+                            <div class="item-content">
+                                <video controls preload="metadata" 
+                                       onloadstart="console.log('Video load started for:', '${safePath}')"
+                                       oncanplay="console.log('Video can play:', '${safePath}')"
+                                       onerror="handleVideoError(event, '${safePath}')"
+                                       onloadedmetadata="console.log('Video metadata loaded for:', '${safePath}')"
+                                       onloadeddata="console.log('Video data loaded for:', '${safePath}')">
+                                    
+                                    <source src="/stream/${encodedPath}" type="video/mp4">
+                                    <source src="/stream/${encodedPath}" type="video/webm">
+                                    <source src="/stream/${encodedPath}" type="video/x-matroska">
+                                    
+                                    <div style="padding: 20px; text-align: center; background: #333; border-radius: 8px; color: white;">
+                                        <p>Your browser doesn't support video streaming.</p>
+                                        <p>File: ${file.name}</p>
+                                        <a href="/download/${encodedPath}" style="color: #4CAF50;">⬇️ Download Instead</a>
+                                    </div>
+                                </video>
+                                
+                                <!-- Debug info -->
+                                <div class="debug-info">
+                                    <div><strong>File:</strong> ${file.name}</div>
+                                    <div><strong>Path:</strong> ${file.path}</div>
+                                    <div><strong>Encoded:</strong> ${encodedPath}</div>
+                                    <div><strong>Size:</strong> ${file.sizeFormatted}</div>
+                                    <div><strong>Extension:</strong> ${file.extension}</div>
+                                    <div><strong>Stream URL:</strong> <a href="/stream/${encodedPath}" target="_blank" style="color: #4CAF50;">/stream/${encodedPath}</a></div>
+                                </div>
+                                
+                                <div class="item-actions">
+                                    <a href="/download/${encodedPath}" class="btn">⬇️ Download</a>
+                                    <button class="btn btn-secondary" onclick="testVideoStream('${encodedPath}')">🔧 Test Stream</button>
+                                    <button class="btn btn-secondary" onclick="toggleWatched('${safePath}')">
+                                        ${file.watched ? '👁️ Watched' : '👀 Mark Watched'}
+                                    </button>
+                                    <button class="btn btn-secondary" onclick="toggleTagEditor('${safeId}')">🏷️ Tags</button>
+                                    <a href="/info/${encodedPath}" class="btn btn-secondary">ℹ️ Info</a>
+                                </div>
+
+                                <div class="tag-editor" id="tagEditor-${safeId}">
+                                    <div class="quick-tags">
+                                        <button class="quick-tag" onclick="addQuickTag('${safePath}', 'favorite')">⭐ Favorite</button>
+                                        <button class="quick-tag" onclick="addQuickTag('${safePath}', 'series')">📺 Series</button>
+                                        <button class="quick-tag" onclick="addQuickTag('${safePath}', 'movie')">🎬 Movie</button>
+                                        <button class="quick-tag" onclick="addQuickTag('${safePath}', 'action')">💥 Action</button>
+                                        <button class="quick-tag" onclick="addQuickTag('${safePath}', 'comedy')">😂 Comedy</button>
+                                    </div>
+                                    <input type="text" class="tag-input" placeholder="Add custom tag..." 
+                                           onkeypress="if(event.key==='Enter') addCustomTag('${safePath}', this.value)">
+                                </div>
+                            </div>
+                        </div>
+                    `}).join('')}
+                </div>
+            `}
         </div>
 
         <script>
-            let movies = ${JSON.stringify(movies)};
-            let filteredMovies = [...movies];
+            let allFolders = ${JSON.stringify(contents.folders)};
+            let allFiles = ${JSON.stringify(contents.files)};
+            let filteredItems = [...allFolders, ...allFiles];
 
-            // Search functionality
-            document.getElementById('searchBox').addEventListener('input', filterMovies);
-            document.getElementById('sortSelect').addEventListener('change', filterMovies);
-            document.getElementById('filterSelect').addEventListener('change', filterMovies);
+            // Navigation
+            function navigateToFolder(folderPath) {
+                window.location.href = '/?path=' + encodeURIComponent(folderPath);
+            }
+
+            // Search and filter functionality
+            document.getElementById('searchBox').addEventListener('input', filterContent);
+            document.getElementById('sortSelect').addEventListener('change', filterContent);
+            document.getElementById('filterSelect').addEventListener('change', filterContent);
 
             // View toggle functionality
             document.querySelectorAll('.view-btn').forEach(btn => {
@@ -547,49 +905,64 @@ app.get('/', (req, res) => {
                     btn.classList.add('active');
                     
                     const view = btn.dataset.view;
-                    const container = document.getElementById('moviesGrid');
+                    const container = document.getElementById('contentGrid');
                     
                     if (view === 'list') {
-                        container.className = 'movies-list';
+                        container.className = 'content-list';
                     } else {
-                        container.className = 'movies-grid';
+                        container.className = 'content-grid';
                     }
                 });
             });
 
-            function filterMovies() {
+            function filterContent() {
                 const searchTerm = document.getElementById('searchBox').value.toLowerCase();
                 const sortBy = document.getElementById('sortSelect').value;
                 const filterBy = document.getElementById('filterSelect').value;
 
-                // Filter movies
-                filteredMovies = movies.filter(movie => {
-                    const matchesSearch = movie.displayName.toLowerCase().includes(searchTerm) || 
-                                        movie.tags.some(tag => tag.toLowerCase().includes(searchTerm));
+                // Combine folders and files for filtering
+                let allItems = [...allFolders.map(f => ({...f, type: 'folder'})), ...allFiles.map(f => ({...f, type: 'file'}))];
+
+                // Filter items
+                filteredItems = allItems.filter(item => {
+                    const matchesSearch = item.name.toLowerCase().includes(searchTerm) || 
+                                        (item.displayName && item.displayName.toLowerCase().includes(searchTerm)) ||
+                                        (item.tags && item.tags.some(tag => tag.toLowerCase().includes(searchTerm)));
                     
                     let matchesFilter = true;
-                    if (filterBy === 'watched') {
-                        matchesFilter = movie.watched;
+                    if (filterBy === 'folders') {
+                        matchesFilter = item.type === 'folder';
+                    } else if (filterBy === 'files') {
+                        matchesFilter = item.type === 'file';
+                    } else if (filterBy === 'watched') {
+                        matchesFilter = item.watched === true;
                     } else if (filterBy === 'unwatched') {
-                        matchesFilter = !movie.watched;
+                        matchesFilter = item.type === 'file' && !item.watched;
                     } else if (filterBy && filterBy !== '') {
-                        matchesFilter = movie.tags.includes(filterBy);
+                        matchesFilter = item.tags && item.tags.includes(filterBy);
                     }
 
                     return matchesSearch && matchesFilter;
                 });
 
-                // Sort movies
-                filteredMovies.sort((a, b) => {
+                // Sort items
+                filteredItems.sort((a, b) => {
                     const [field, order] = sortBy.split('-');
                     let comparison = 0;
 
+                    // Folders first, then files (unless sorting by type-specific fields)
+                    if (field !== 'size' && a.type !== b.type) {
+                        return a.type === 'folder' ? -1 : 1;
+                    }
+
                     switch (field) {
                         case 'name':
-                            comparison = a.displayName.localeCompare(b.displayName);
+                            const nameA = a.displayName || a.name;
+                            const nameB = b.displayName || b.name;
+                            comparison = nameA.localeCompare(nameB);
                             break;
                         case 'size':
-                            comparison = a.size - b.size;
+                            comparison = (a.size || 0) - (b.size || 0);
                             break;
                         case 'modified':
                             comparison = new Date(a.modified) - new Date(b.modified);
@@ -599,47 +972,56 @@ app.get('/', (req, res) => {
                     return order === 'desc' ? -comparison : comparison;
                 });
 
-                renderMovies();
+                renderContent();
                 updateStats();
             }
 
-            function renderMovies() {
-                const container = document.getElementById('moviesGrid');
+            function renderContent() {
+                const container = document.getElementById('contentGrid');
                 
-                if (filteredMovies.length === 0) {
-                    container.innerHTML = '<div class="no-results">No movies found matching your criteria</div>';
+                if (filteredItems.length === 0) {
+                    container.innerHTML = '<div class="no-results">No items found matching your criteria</div>';
                     return;
                 }
 
-                // Hide all movies first
-                document.querySelectorAll('.movie').forEach(movie => {
-                    movie.classList.add('hidden');
+                // Hide all items first
+                document.querySelectorAll('.item').forEach(item => {
+                    item.classList.add('hidden');
                 });
 
-                // Show filtered movies
-                filteredMovies.forEach(movie => {
-                    const movieElement = document.querySelector('[data-name="' + movie.displayName.toLowerCase() + '"]');
-                    if (movieElement) {
-                        movieElement.classList.remove('hidden');
+                // Show filtered items
+                filteredItems.forEach(item => {
+                    const itemName = (item.displayName || item.name).toLowerCase();
+                    const itemElement = document.querySelector('[data-name="' + itemName + '"][data-type="' + item.type + '"]');
+                    if (itemElement) {
+                        itemElement.classList.remove('hidden');
                     }
                 });
             }
 
             function updateStats() {
-                const total = filteredMovies.length;
-                const watched = filteredMovies.filter(m => m.watched).length;
-                const totalSize = filteredMovies.reduce((sum, m) => sum + m.size, 0);
+                const folders = filteredItems.filter(item => item.type === 'folder').length;
+                const files = filteredItems.filter(item => item.type === 'file').length;
+                const watched = filteredItems.filter(item => item.watched).length;
+                const totalSize = filteredItems.reduce((sum, item) => sum + (item.size || 0), 0);
                 const sizeGB = (totalSize / 1024 / 1024 / 1024).toFixed(1);
 
-                document.getElementById('statsDisplay').textContent = 
-                    'Showing ' + total + ' movies • ' + watched + ' watched • ' + sizeGB + ' GB total';
+                let statsText = 'Showing ' + folders + ' folders and ' + files + ' files';
+                if (watched > 0) {
+                    statsText += ' • ' + watched + ' watched';
+                }
+                if (totalSize > 0) {
+                    statsText += ' • ' + sizeGB + ' GB total';
+                }
+
+                document.getElementById('statsDisplay').textContent = statsText;
             }
 
-            function toggleWatched(moviePath) {
+            function toggleWatched(filePath) {
                 fetch('/api/toggle-watched', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ moviePath })
+                    body: JSON.stringify({ filePath })
                 })
                 .then(response => response.json())
                 .then(data => {
@@ -660,13 +1042,13 @@ app.get('/', (req, res) => {
                 }
             }
 
-            function addQuickTag(moviePath, tag) {
-                addTag(moviePath, tag);
+            function addQuickTag(filePath, tag) {
+                addTag(filePath, tag);
             }
 
-            function addCustomTag(moviePath, tag) {
+            function addCustomTag(filePath, tag) {
                 if (tag && tag.trim()) {
-                    addTag(moviePath, tag.trim());
+                    addTag(filePath, tag.trim());
                     // Clear input
                     const input = event.target;
                     if (input) {
@@ -675,11 +1057,11 @@ app.get('/', (req, res) => {
                 }
             }
 
-            function addTag(moviePath, tag) {
+            function addTag(filePath, tag) {
                 fetch('/api/add-tag', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ moviePath, tag })
+                    body: JSON.stringify({ filePath, tag })
                 })
                 .then(response => response.json())
                 .then(data => {
@@ -693,8 +1075,125 @@ app.get('/', (req, res) => {
                 });
             }
 
+            // Enhanced video debugging functions
+            function handleVideoError(event, filePath) {
+                console.error('Video error for:', filePath);
+                console.error('Error event:', event);
+                
+                const video = event.target;
+                const error = video.error;
+                
+                if (error) {
+                    let errorMessage = 'Unknown video error';
+                    let suggestion = '';
+                    
+                    switch (error.code) {
+                        case 1:
+                            errorMessage = 'Video loading was aborted';
+                            suggestion = 'Try refreshing the page or check your network connection.';
+                            break;
+                        case 2:
+                            errorMessage = 'Network error while loading video';
+                            suggestion = 'Check your internet connection and try again.';
+                            break;
+                        case 3:
+                            errorMessage = 'Video format not supported or file is corrupted';
+                            suggestion = 'Try downloading the file or convert it to MP4 format.';
+                            break;
+                        case 4:
+                            errorMessage = 'Video source not found or server error';
+                            suggestion = 'The file might be missing or the server is having issues.';
+                            break;
+                    }
+                    
+                    console.error('Video error details:', {
+                        code: error.code,
+                        message: errorMessage,
+                        filePath: filePath,
+                        videoSrc: video.currentSrc || video.src
+                    });
+                    
+                    // Create and show error message
+                    const errorDiv = document.createElement('div');
+                    errorDiv.className = 'error-message';
+                   
+                    
+                    // Insert error message after the video
+                    video.parentNode.insertBefore(errorDiv, video.nextSibling);
+                }
+            }
+
+            function testVideoStream(encodedPath) {
+                const streamUrl = '/stream/' + encodedPath;
+                console.log('Testing stream URL:', streamUrl);
+                
+                // Test with HEAD request first
+                fetch(streamUrl, { method: 'HEAD' })
+                    .then(response => {
+                        console.log('Stream test response:', {
+                            status: response.status,
+                            statusText: response.statusText,
+                            headers: Object.fromEntries(response.headers.entries())
+                        });
+                        
+                        if (response.ok) {
+                            const contentType = response.headers.get('content-type');
+                            const contentLength = response.headers.get('content-length');
+                            const acceptRanges = response.headers.get('accept-ranges');
+                            
+                           
+                        } else {
+                            
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Stream test error:', error);
+                        
+                    });
+            }
+
+            function retryVideo(filePath) {
+                // Find the video element and reload it
+                const videos = document.querySelectorAll('video');
+                videos.forEach(video => {
+                    const sources = video.querySelectorAll('source');
+                    sources.forEach(source => {
+                        if (source.src.includes(encodeURIComponent(filePath))) {
+                            console.log('Retrying video:', filePath);
+                            // Remove any error messages
+                            const errorMessages = video.parentNode.querySelectorAll('.error-message');
+                            errorMessages.forEach(msg => msg.remove());
+                            video.load(); // Reload the video
+                            return;
+                        }
+                    });
+                });
+            }
+
+            // Add debugging for all video events
+            document.addEventListener('DOMContentLoaded', function() {
+                const videos = document.querySelectorAll('video');
+                videos.forEach(video => {
+                    video.addEventListener('progress', function() {
+                        if (video.buffered.length > 0) {
+                            const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+                            const duration = video.duration;
+                            
+                        }
+                    });
+                    
+                    video.addEventListener('waiting', function() {
+                        console.log('Video is waiting for more data...');
+                    });
+                    
+                    video.addEventListener('playing', function() {
+                        console.log('Video started playing successfully');
+                    });
+                });
+            });
+
             // Initialize
-            filterMovies();
+            filterContent();
         </script>
     </body>
     </html>
@@ -759,28 +1258,27 @@ app.get('/logout', (req, res) => {
     });
 });
 
+// API endpoints
 app.post('/api/toggle-watched', (req, res) => {
     try {
-        const { moviePath } = req.body;
-        if (!moviePath) {
-            return res.status(400).json({ error: 'Movie path is required' });
+        const { filePath } = req.body;
+        if (!filePath) {
+            return res.status(400).json({ error: 'File path is required' });
         }
         
-        const filename = path.basename(moviePath);
-        
-        if (!movieTags[filename]) {
-            movieTags[filename] = [];
+        if (!movieTags[filePath]) {
+            movieTags[filePath] = [];
         }
         
-        const watchedIndex = movieTags[filename].indexOf('watched');
+        const watchedIndex = movieTags[filePath].indexOf('watched');
         if (watchedIndex > -1) {
-            movieTags[filename].splice(watchedIndex, 1);
+            movieTags[filePath].splice(watchedIndex, 1);
         } else {
-            movieTags[filename].push('watched');
+            movieTags[filePath].push('watched');
         }
         
         saveTags();
-        console.log(`[${new Date().toISOString()}] User ${req.auth.user} toggled watched status for: ${filename}`);
+        console.log(`[${new Date().toISOString()}] User ${req.auth.user} toggled watched status for: ${filePath}`);
         res.json({ success: true });
     } catch (error) {
         console.error('Error toggling watched status:', error);
@@ -790,23 +1288,21 @@ app.post('/api/toggle-watched', (req, res) => {
 
 app.post('/api/add-tag', (req, res) => {
     try {
-        const { moviePath, tag } = req.body;
-        if (!moviePath || !tag) {
-            return res.status(400).json({ error: 'Movie path and tag are required' });
+        const { filePath, tag } = req.body;
+        if (!filePath || !tag) {
+            return res.status(400).json({ error: 'File path and tag are required' });
         }
         
-        const filename = path.basename(moviePath);
-        
-        if (!movieTags[filename]) {
-            movieTags[filename] = [];
+        if (!movieTags[filePath]) {
+            movieTags[filePath] = [];
         }
         
-        if (!movieTags[filename].includes(tag)) {
-            movieTags[filename].push(tag);
+        if (!movieTags[filePath].includes(tag)) {
+            movieTags[filePath].push(tag);
             saveTags();
         }
         
-        console.log(`[${new Date().toISOString()}] User ${req.auth.user} added tag "${tag}" to: ${filename}`);
+        console.log(`[${new Date().toISOString()}] User ${req.auth.user} added tag "${tag}" to: ${filePath}`);
         res.json({ success: true });
     } catch (error) {
         console.error('Error adding tag:', error);
@@ -816,22 +1312,20 @@ app.post('/api/add-tag', (req, res) => {
 
 app.delete('/api/remove-tag', (req, res) => {
     try {
-        const { moviePath, tag } = req.body;
-        if (!moviePath || !tag) {
-            return res.status(400).json({ error: 'Movie path and tag are required' });
+        const { filePath, tag } = req.body;
+        if (!filePath || !tag) {
+            return res.status(400).json({ error: 'File path and tag are required' });
         }
         
-        const filename = path.basename(moviePath);
-        
-        if (movieTags[filename]) {
-            const tagIndex = movieTags[filename].indexOf(tag);
+        if (movieTags[filePath]) {
+            const tagIndex = movieTags[filePath].indexOf(tag);
             if (tagIndex > -1) {
-                movieTags[filename].splice(tagIndex, 1);
+                movieTags[filePath].splice(tagIndex, 1);
                 saveTags();
             }
         }
         
-        console.log(`[${new Date().toISOString()}] User ${req.auth.user} removed tag "${tag}" from: ${filename}`);
+        console.log(`[${new Date().toISOString()}] User ${req.auth.user} removed tag "${tag}" from: ${filePath}`);
         res.json({ success: true });
     } catch (error) {
         console.error('Error removing tag:', error);
@@ -839,121 +1333,239 @@ app.delete('/api/remove-tag', (req, res) => {
     }
 });
 
-// Stream endpoint with better error handling
-app.get('/stream/:filename', (req, res) => {
+// Add subtitle serving endpoint
+app.get('/api/subtitle/:filename(*)/:track', async (req, res) => {
     try {
-        const filename = decodeURIComponent(req.params.filename);
-        const filePath = validateFilePath(filename);
+        const encodedPath = req.params.filename;
+        const trackIndex = parseInt(req.params.track);
+        const decodedPath = safeDecodeFilePath(encodedPath);
+        const fullVideoPath = validateFilePath(decodedPath);
         
-        if (!fs.existsSync(filePath)) {
-            return res.status(404).send('File not found');
+        if (!fs.existsSync(fullVideoPath)) {
+            return res.status(404).send('Video file not found');
         }
-
-        const stat = fs.statSync(filePath);
-        const fileSize = stat.size;
-        const range = req.headers.range;
-
-        const protocol = req.secure ? 'HTTPS' : 'HTTP';
-        console.log(`[${new Date().toISOString()}] ${protocol} - User ${req.auth.user} streaming: ${filename}`);
-
-        if (range) {
-            const parts = range.replace(/bytes=/, "").split("-");
-            const start = parseInt(parts[0], 10);
-            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-            
-            if (start >= fileSize || end >= fileSize) {
-                return res.status(416).send('Range Not Satisfiable');
-            }
-            
-            const chunksize = (end - start) + 1;
-            const file = fs.createReadStream(filePath, { start, end });
-            const head = {
-                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-                'Accept-Ranges': 'bytes',
-                'Content-Length': chunksize,
-                'Content-Type': 'video/mp4',
-                'Cache-Control': 'no-cache'
-            };
-            res.writeHead(206, head);
-            file.pipe(res);
-        } else {
-            const head = {
-                'Content-Length': fileSize,
-                'Content-Type': 'video/mp4',
-                'Cache-Control': 'no-cache'
-            };
-            res.writeHead(200, head);
-            fs.createReadStream(filePath).pipe(res);
+        
+        // Create temp directory for subtitles
+        const tempDir = path.join(__dirname, 'temp', 'subtitles');
+        if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
         }
+        
+        const videoBasename = path.basename(fullVideoPath, path.extname(fullVideoPath));
+        const subtitlePath = path.join(tempDir, `${videoBasename}_${trackIndex}.vtt`);
+        
+        // Check if subtitle already extracted
+        if (fs.existsSync(subtitlePath)) {
+            res.setHeader('Content-Type', 'text/vtt');
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            return res.sendFile(subtitlePath);
+        }
+        
+        // Extract subtitle on demand
+        ffmpeg(fullVideoPath)
+            .outputOptions([
+                `-map 0:s:${trackIndex}`,
+                '-c:s webvtt'
+            ])
+            .output(subtitlePath)
+            .on('end', () => {
+                res.setHeader('Content-Type', 'text/vtt');
+                res.setHeader('Access-Control-Allow-Origin', '*');
+                res.sendFile(subtitlePath);
+            })
+            .on('error', (err) => {
+                console.error('Subtitle extraction error:', err);
+                res.status(500).send('Subtitle extraction failed');
+            })
+            .run();
+            
     } catch (error) {
-        console.error(`Security violation attempt: ${error.message}`);
-        res.status(403).send('Access denied');
+        console.error('Subtitle serving error:', error);
+        res.status(500).send('Subtitle serving failed');
     }
 });
 
-app.get('/download/:filename', (req, res) => {
+// Add subtitle info endpoint
+app.get('/api/subtitle-info/:filename(*)', async (req, res) => {
     try {
-        const filename = decodeURIComponent(req.params.filename);
-        const filePath = validateFilePath(filename);
+        const encodedPath = req.params.filename;
+        const decodedPath = safeDecodeFilePath(encodedPath);
+        const fullVideoPath = validateFilePath(decodedPath);
         
-        if (!fs.existsSync(filePath)) {
+        if (!fs.existsSync(fullVideoPath)) {
+            return res.status(404).json({ error: 'Video file not found' });
+        }
+        
+        // Probe video for subtitle streams
+        ffmpeg.ffprobe(fullVideoPath, (err, metadata) => {
+            if (err) {
+                console.error('FFprobe error:', err);
+                return res.json({ subtitles: [] });
+            }
+            
+            const streams = metadata.streams || [];
+            const subtitleStreams = streams
+                .filter(stream => stream.codec_type === 'subtitle')
+                .map((stream, index) => ({
+                    index: stream.index,
+                    trackIndex: index,
+                    language: stream.tags?.language || 'unknown',
+                    title: stream.tags?.title || `Subtitle ${index + 1}`,
+                    codec: stream.codec_name,
+                    url: `/api/subtitle/${encodeURIComponent(decodedPath)}/${index}`
+                }));
+            
+            res.json({ subtitles: subtitleStreams });
+        });
+        
+    } catch (error) {
+        console.error('Subtitle info error:', error);
+        res.status(500).json({ error: 'Failed to get subtitle info' });
+    }
+});
+
+// Enhanced stream endpoint with better path handling
+// Update the file info to include subtitle information
+app.get('/api/info/:filename(*)', async (req, res) => {
+    try {
+        const encodedPath = req.params.filename;
+        const decodedPath = safeDecodeFilePath(encodedPath);
+        const fullPath = validateFilePath(decodedPath);
+        
+        if (!fs.existsSync(fullPath)) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+
+        if (!fs.statSync(fullPath).isFile()) {
+            return res.status(400).json({ error: 'Path is not a file' });
+        }
+        
+        const stats = fs.statSync(fullPath);
+        
+        // Get subtitle info if it's a video file
+        let subtitleInfo = { subtitles: [] };
+        if (SUPPORTED_FORMATS.includes(path.extname(decodedPath).toLowerCase())) {
+            try {
+                const subtitleResponse = await new Promise((resolve) => {
+                    ffmpeg.ffprobe(fullPath, (err, metadata) => {
+                        if (err) {
+                            return resolve({ subtitles: [] });
+                        }
+                        
+                        const streams = metadata.streams || [];
+                        const subtitleStreams = streams
+                            .filter(stream => stream.codec_type === 'subtitle')
+                            .map((stream, index) => ({
+                                index: stream.index,
+                                trackIndex: index,
+                                language: stream.tags?.language || 'unknown',
+                                title: stream.tags?.title || `Subtitle ${index + 1}`,
+                                codec: stream.codec_name
+                            }));
+                        
+                        resolve({ subtitles: subtitleStreams });
+                    });
+                });
+                subtitleInfo = subtitleResponse;
+            } catch (subtitleError) {
+                console.error('Error getting subtitle info:', subtitleError);
+            }
+        }
+        
+        const info = {
+            name: path.basename(decodedPath),
+            path: decodedPath,
+            size: stats.size,
+            sizeFormatted: `${(stats.size / 1024 / 1024 / 1024).toFixed(2)} GB`,
+            created: stats.birthtime,
+            modified: stats.mtime,
+            extension: path.extname(decodedPath),
+            tags: movieTags[decodedPath] || [],
+            ...subtitleInfo
+        };
+        
+        res.json(info);
+    } catch (error) {
+        console.error(`Error getting file info: ${error.message}`);
+        res.status(500).json({ error: 'Failed to get file info: ' + error.message });
+    }
+});
+
+// Updated download endpoint with same path handling
+app.get('/download/:filename(*)', (req, res) => {
+    try {
+        const encodedPath = req.params.filename + (req.params[0] ? req.params[0] : '');
+        const decodedPath = safeDecodeFilePath(encodedPath);
+        const fullPath = validateFilePath(decodedPath);
+        
+        if (!fs.existsSync(fullPath)) {
             return res.status(404).send('File not found');
+        }
+
+        if (!fs.statSync(fullPath).isFile()) {
+            return res.status(400).send('Path is not a file');
         }
         
         const protocol = req.secure ? 'HTTPS' : 'HTTP';
-        console.log(`[${new Date().toISOString()}] ${protocol} - User ${req.auth.user} downloading: ${filename}`);
+        const filename = path.basename(decodedPath);
+        console.log(`[${new Date().toISOString()}] ${protocol} - User ${req.auth.user} downloading: ${decodedPath}`);
         
-        const stats = fs.statSync(filePath);
+        const stats = fs.statSync(fullPath);
         const fileSize = stats.size;
         
-        // Set proper headers for download
+        // Set proper headers for download with better filename handling
         res.setHeader('Content-Type', 'application/octet-stream');
         res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
         res.setHeader('Content-Length', fileSize);
         res.setHeader('Cache-Control', 'no-cache');
         
-        // Stream the file
-        const fileStream = fs.createReadStream(filePath);
+        const fileStream = fs.createReadStream(fullPath);
         fileStream.pipe(res);
         
         fileStream.on('error', (error) => {
-            console.error('File stream error:', error);
+            console.error('Download stream error:', error);
             if (!res.headersSent) {
                 res.status(500).send('Download failed');
             }
         });
         
     } catch (error) {
-        console.error(`Security violation attempt: ${error.message}`);
-        res.status(403).send('Access denied');
+        console.error(`Download error: ${error.message}`);
+        res.status(500).send('Download failed: ' + error.message);
     }
 });
 
-app.get('/info/:filename', (req, res) => {
+// Updated info endpoint
+app.get('/info/:filename(*)', (req, res) => {
     try {
-        const filename = decodeURIComponent(req.params.filename);
-        const filePath = validateFilePath(filename);
+        const encodedPath = req.params.filename + (req.params[0] ? req.params[0] : '');
+        const decodedPath = safeDecodeFilePath(encodedPath);
+        const fullPath = validateFilePath(decodedPath);
         
-        if (!fs.existsSync(filePath)) {
+        if (!fs.existsSync(fullPath)) {
             return res.status(404).json({ error: 'File not found' });
         }
+
+        if (!fs.statSync(fullPath).isFile()) {
+            return res.status(400).json({ error: 'Path is not a file' });
+        }
         
-        const stats = fs.statSync(filePath);
-        const baseFilename = path.basename(filename);
+        const stats = fs.statSync(fullPath);
         const info = {
-            name: filename,
+            name: path.basename(decodedPath),
+            path: decodedPath,
             size: stats.size,
             sizeFormatted: `${(stats.size / 1024 / 1024 / 1024).toFixed(2)} GB`,
             created: stats.birthtime,
             modified: stats.mtime,
-            extension: path.extname(filename),
-            tags: movieTags[baseFilename] || []
+            extension: path.extname(decodedPath),
+            tags: movieTags[decodedPath] || []
         };
         
         res.json(info);
     } catch (error) {
         console.error(`Error getting file info: ${error.message}`);
-        res.status(403).json({ error: 'Access denied' });
+        res.status(500).json({ error: 'Failed to get file info: ' + error.message });
     }
 });
 
@@ -995,9 +1607,9 @@ function startServer() {
             const httpsServer = https.createServer(credentials, app);
             httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
                 console.log(`🔒 HTTPS server running on port ${HTTPS_PORT}`);
-                console.log(`🎬 Advanced Media Server: https://blankmask.local:${HTTPS_PORT}`);
-                console.log(`📁 Movies folder: ${MOVIES_FOLDER}`);
-                console.log(`🛡️ Security: HTTPS ✓ Auth ✓ Rate Limit ✓ Tags ✓`);
+                console.log(`📁 File System Media Server: https://blankmask.local:${HTTPS_PORT}`);
+                console.log(`📂 Media root: ${MEDIA_ROOT}`);
+                console.log(`🛡️ Security: HTTPS ✓ Auth ✓ Rate Limit ✓ File System Browser ✓`);
             });
 
             // Handle HTTPS server errors
@@ -1011,9 +1623,9 @@ function startServer() {
         }
     } else {
         console.log('⚠️  SSL certificates not found. Running HTTP only.');
-        console.log('🎬 HTTP Media Server: http://blankmask.local:' + HTTP_PORT);
+        console.log('📁 HTTP File System Media Server: http://blankmask.local:' + HTTP_PORT);
         console.log('⚠️  WARNING: HTTP is unencrypted! Generate SSL certificates for security.');
-        console.log('📁 Movies folder:', MOVIES_FOLDER);
+        console.log('📂 Media root:', MEDIA_ROOT);
         console.log('🔧 To enable HTTPS, run: openssl req -x509 -newkey rsa:2048 -keyout certs/server.key -out certs/server.crt -days 365 -nodes');
     }
 
@@ -1027,10 +1639,15 @@ function startServer() {
     });
 }
 
-// Validate movies folder on startup
-if (!fs.existsSync(MOVIES_FOLDER)) {
-    console.error(`❌ Movies folder does not exist: ${MOVIES_FOLDER}`);
-    console.error('Please update the MOVIES_FOLDER path in the code or create the directory.');
+// Validate media root folder on startup
+if (!fs.existsSync(MEDIA_ROOT)) {
+    console.error(`❌ Media root folder does not exist: ${MEDIA_ROOT}`);
+    console.error('Please update the MEDIA_ROOT path in the code or create the directory.');
+    process.exit(1);
+}
+
+if (!fs.statSync(MEDIA_ROOT).isDirectory()) {
+    console.error(`❌ Media root path is not a directory: ${MEDIA_ROOT}`);
     process.exit(1);
 }
 
@@ -1038,12 +1655,12 @@ startServer();
 
 // Handle graceful shutdown
 process.on('SIGINT', () => {
-    console.log('\n🎬 Shutting down Advanced Media Server...');
+    console.log('\n📁 Shutting down File System Media Server...');
     process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-    console.log('\n🎬 Shutting down Advanced Media Server...');
+    console.log('\n📁 Shutting down File System Media Server...');
     process.exit(0);
 });
 
